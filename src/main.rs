@@ -88,7 +88,7 @@ fn consume_delimiter<R>(reader: &mut BufReader<R>) -> Result<bool, Box<dyn std::
 where R: Read {
     // Consume the delimiter \r\n
     // TODO: what if \r\n not totaly match?
-    let mut buf_delimiter = [0u8; 4];
+    let mut buf_delimiter = [0u8; 2];
     reader.read_exact(&mut buf_delimiter)?;
     let delimiter = String::from_utf8(buf_delimiter.to_vec())?;
 
