@@ -28,8 +28,7 @@ pub struct TcpClient {
 }
 
 const DELIMITER: &str = "\r\n";
-pub const BUFFER_SIZE_I32: i32 = 4096;
-pub const BUFFER_SIZE_USIZE: usize = 4096;
+pub const BUFFER_SIZE: i32 = 4096;
 
 
 impl TcpClient {
@@ -44,7 +43,7 @@ impl TcpClient {
     }
 
     pub fn read_socket(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut tmp_buf = [0u8; BUFFER_SIZE_USIZE];
+        let mut tmp_buf = [0u8; BUFFER_SIZE as usize];
         
         // This triggered by epoll_wait and having key matched
         // so there should be data to read

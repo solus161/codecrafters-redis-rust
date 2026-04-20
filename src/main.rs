@@ -12,22 +12,21 @@ mod utils;
 mod epoll;
 mod client;
 
-use crate::client::{TcpClient, BUFFER_SIZE_USIZE, BUFFER_SIZE_I32};
-
-const LISTENER_KEY: u64 = 100;
+use crate::client::{TcpClient, BUFFER_SIZE};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Uncomment the code below to pass the first stage
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
     listener.set_nonblocking(true).unwrap();
     let listener_fd = listener.as_raw_fd();
+    let listener_fd_u64 = listener_fd as u64;
 
     // Get fd on epoll event
     let epoll_fd = epoll::epoll_create().expect("Error creating epoll queue");
     
-    epoll::add_interest(epoll_fd, listener_fd, epoll::get_epoll_event_read(LISTENER_KEY))?;
+    epoll::add_interest(epoll_fd, listener_fd, epoll::get_epoll_event_read(listener_fd_u64))?;
     
-    let mut events: Vec<libc::epoll_event> = Vec::with_capacity(BUFFER_SIZE_USIZE);
+    let mut events: Vec<libc::epoll_event> = Vec::with_capacity(BUFFER_SIZE as usize);
     let mut clients: HashMap<u64, TcpClient> = HashMap::new();
 
     loop {
@@ -39,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             epoll_wait(
                 epoll_fd,
                 events.as_mut_ptr() as *mut libc::epoll_event,
-                BUFFER_SIZE_I32,
+                BUFFER_SIZE,
                 1000 as libc::c_int,
             )
         ) {
@@ -50,33 +49,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         unsafe { events.set_len(res as usize)};
 
         for ev in &events {
-            match ev.u64 {
+            let ev_key = ev.u64;
+            match ev_key {
                 // New client comming in
-                100 => {
+                _key if _key == listener_fd_u64 => {
                     match listener.accept() {
                         Ok((stream, addr)) => {
                             stream.set_nonblocking(true)?;
                             println!("New client: {}", addr);
 
                             // Add the stream fd to epoll watch queue
+                            let stream_key = stream.as_raw_fd();
                             epoll::add_interest(
                                 epoll_fd,
-                                stream.as_raw_fd(), epoll::get_epoll_event_read(LISTENER_KEY))?;
-                            clients.insert(stream.as_raw_fd() as u64, TcpClient::new(stream));
-                            println!("Registered epoll with key {}", LISTENER_KEY);
+                                stream_key,
+                                epoll::get_epoll_event_read(stream_key as u64))?;
+                            clients.insert(
+                                stream_key.try_into().unwrap(),
+                                TcpClient::new(stream));
+                            println!("Registered epoll with key {}", stream_key);
                         },
-                        Err(e) => eprintln!("Coundn't accept: {}", e),
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {eprintln!("{}", e)},
+                        Err(e) => eprintln!("Couldn't accept: {}", e),
                     };
-
-                    // Register epoll with key 100 again
+                    
+                    println!("Try to modify interest");
+                    // Register epoll queue with its own key again
                     epoll::modify_interest(
-                        epoll_fd, listener_fd, 
-                        epoll::get_epoll_event_read(100))?;
+                        epoll_fd, listener_fd.try_into().unwrap(), 
+                        epoll::get_epoll_event_read(listener_fd as u64))?;
                 },
                 
                 // St else, may be current client
                 key => {
                     //println!("key in events {}", key);
+                    println!{"Package with key {}", key};
                     if let Some(client) = clients.get_mut(&key) {
                         let mut disconnected = false;
                         // Bit mask of event type of an epoll event
@@ -88,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Ok(()) => {
                                         // Register the epoll again
                                         epoll::modify_interest(
-                                            epoll_fd, client.stream.as_raw_fd(), 
+                                            epoll_fd, key as i32, 
                                             epoll::get_epoll_event_read(key))?;
                                         println!("Registered epoll with key {} again", key);
                                     },
@@ -115,6 +122,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-
 }
 
