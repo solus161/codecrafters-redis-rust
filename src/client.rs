@@ -93,11 +93,9 @@ impl TcpClient {
                     }; 
                 },
                 ParsingStatus::Delimiter(boxed) => {
-                    if self.buf.len() < 2 {
-                        // Delimiter may not completed in current stream
-                        self.parsing_status = ParsingStatus::Delimiter(boxed);
-                        return Ok(());
-                    } else {
+                        // self.parsing_status = ParsingStatus::Delimiter(boxed);
+                    if self.buf.len() >= 2 {
+                        // Consume delimiters
                         let slice: Vec<u8> = self.buf.iter().take(2).copied().collect();
                         match from_utf8(&slice) {
                             Ok(delimiter) => {
@@ -105,25 +103,29 @@ impl TcpClient {
                                 if delimiter == DELIMITER {
                                     self.buf.drain(..2);
                                 } else {
-                                    panic!{"Error parsing delimiter \r\n"};
+                                    panic!("Error parsing delimiter \r\n, got {}", &delimiter);
                                 }
                             },
                             Err(e) => {
-                                panic!{"Error parsing delimiter \r\n: {}", e};
+                                panic!("Error parsing delimiter \r\n: {}", e);
                             },
-                        };
+                        }
+                    } else {
+                        self.parsing_status = ParsingStatus::Delimiter(boxed);
+                        return Ok(());
                     };
-                    
+
                     // The delimiter must followed by st else, st valid
                     match *boxed {
-                         ParsingStatus::ArgLen(_) => {
-                             self.parsing_status = ParsingStatus::ArgLen(String::new());
-                             //self.buf.pop_front();
-                         },
-                         ParsingStatus::Arg{ arg, len } => {
-                            self.parsing_status = ParsingStatus::Arg{ arg, len };
-                         },
-                         _ => panic!("Error parsing stream"),
+                        // The delimiter could followed by another delimiter
+                        ParsingStatus::ArgLen(_) => {
+                            self.parsing_status = ParsingStatus::ArgLen(String::new());
+                            //self.buf.pop_front();
+                        },
+                        ParsingStatus::Arg{ arg, len } => {
+                           self.parsing_status = ParsingStatus::Arg{ arg, len };
+                        },
+                        _ => panic!("Error parsing stream"),
                     };
                 },
                 ParsingStatus::ArgsCount(arg) => {
@@ -205,6 +207,7 @@ impl TcpClient {
 
     fn parse_digit(&mut self, mut arg: String, prefix: char) -> ArgCompleted {
         // Digit must start with $, else error
+        // and end with \r\n
         //println!("Buf before parsing digit {:?}", &self.buf);
         if self.buf.len() == 0 {
             ArgCompleted::Incompleted(arg)
