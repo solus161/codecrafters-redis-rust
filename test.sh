@@ -1,7 +1,7 @@
 #!/bin/bash
 {
   printf "*2\r\n\$4\r\nECHO\r\n\$5\r\ngrape\r\n"
-
+  printf "*2\r\n\$4\r\nECHO\r\n\$6\r\nbanana\r\n"
   printf "*1\r\n\$4\r\nPI"  # partial
   sleep 1.0
   printf "NG\r\n"           # remaining
