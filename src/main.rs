@@ -10,6 +10,7 @@ use libc;
 #[macro_use]
 mod utils;
 mod epoll;
+mod cmd_handler;
 mod client;
 
 use crate::client::{TcpClient, BUFFER_SIZE};
@@ -54,9 +55,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // New client comming in
                 _key if _key == listener_fd_u64 => {
                     match listener.accept() {
-                        Ok((stream, addr)) => {
+                        Ok((stream, _)) => {
                             stream.set_nonblocking(true)?;
-                            println!("New client: {}", addr);
+                            // println!("New client: {}", addr);
 
                             // Add the stream fd to epoll watch queue
                             let stream_key = stream.as_raw_fd();
@@ -67,13 +68,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             clients.insert(
                                 stream_key.try_into().unwrap(),
                                 TcpClient::new(stream));
-                            println!("Registered epoll with key {}", stream_key);
+                            // println!("Registered epoll with key {}", stream_key);
                         },
                         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {eprintln!("{}", e)},
                         Err(e) => eprintln!("Couldn't accept: {}", e),
                     };
                     
-                    println!("Try to modify interest");
+                    // println!("Try to modify interest");
                     // Register epoll queue with its own key again
                     epoll::modify_interest(
                         epoll_fd, listener_fd.try_into().unwrap(), 
@@ -83,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // St else, may be current client
                 key => {
                     //println!("key in events {}", key);
-                    println!{"Package with key {}", key};
+                    // println!{"Package with key {}", key};
                     if let Some(client) = clients.get_mut(&key) {
                         let mut disconnected = false;
                         // Bit mask of event type of an epoll event
@@ -97,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         epoll::modify_interest(
                                             epoll_fd, key as i32, 
                                             epoll::get_epoll_event_read(key))?;
-                                        println!("Registered epoll with key {} again", key);
+                                        // println!("Registered epoll with key {} again", key);
                                     },
                                     Err(boxed_e) => {
                                         println!("Error with client fd {}: {:?}", key, boxed_e);

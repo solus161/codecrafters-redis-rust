@@ -3,6 +3,8 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::str::from_utf8;
 
+use crate::cmd_handler::Cmd;
+
 #[derive(Debug)]
 pub enum ParsingStatus {
     ArgsCount(String),
@@ -99,12 +101,15 @@ impl TcpClient {
                         let slice: Vec<u8> = self.buf.iter().take(2).copied().collect();
                         match from_utf8(&slice) {
                             Ok(delimiter) => {
+                                println!("Trying to parse delimiter {:?}", &delimiter.as_bytes());
                                 if delimiter == DELIMITER {
                                     self.buf.drain(..2);
+                                } else {
+                                    panic!{"Error parsing delimiter \r\n"};
                                 }
                             },
                             Err(e) => {
-                                panic!{"Error parsing delimiter \r\n: {}", e}
+                                panic!{"Error parsing delimiter \r\n: {}", e};
                             },
                         };
                     };
@@ -172,6 +177,9 @@ impl TcpClient {
                                 let _ = self.response();
                                 self.parsing_status = ParsingStatus::None;
                             } else {
+                                self.parsing_status = ParsingStatus::Delimiter(
+                                    Box::new(ParsingStatus::ArgLen(String::new()))
+                                );
                                 return Ok(())
                             }
                         }
@@ -183,12 +191,16 @@ impl TcpClient {
 
     fn response(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Response based on args
-        for arg in self.args.drain(..) {
-            if arg == "PING" {
-                let _ = self.stream.write_all("+PONG\r\n".as_bytes());
-            };
-        };
-        Ok(())
+        let args = std::mem::replace(&mut self.args, Vec::<String>::new());
+        let mut cmd = Cmd::new(args);
+        match cmd.handle() {
+            Some(output_str) => {
+                println!("Stream write: {}", &output_str);
+                let _ = self.stream.write_all(output_str.as_bytes());
+                Ok(())
+            },
+            None => Ok(()),
+        }
     }
 
     fn parse_digit(&mut self, mut arg: String, prefix: char) -> ArgCompleted {
