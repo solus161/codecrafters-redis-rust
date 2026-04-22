@@ -19,7 +19,7 @@ impl Cmd {
 
         match cmd {
             s if s == "ping" => {
-                Some("+PONG".to_string())
+                Some("+PONG\r\n".to_string())
             },
             s if s == "echo" => {
                 Some(
