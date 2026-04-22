@@ -182,7 +182,6 @@ impl TcpClient {
                                 self.parsing_status = ParsingStatus::Delimiter(
                                     Box::new(ParsingStatus::ArgLen(String::new()))
                                 );
-                                return Ok(())
                             }
                         }
                     }
