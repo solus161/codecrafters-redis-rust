@@ -3,52 +3,62 @@
   #printf "*2\r\n\$4\r\nECHO\r\n\$5\r\ngrape\r\n"
   printf "*2\r\n\$4\r\nECHO\r\n\$6\r\nbanana\r\n"
   printf "*1\r\n\$4\r\nPI"  # partial
-  sleep 1.0
+  sleep 0.2
   printf "NG\r\n"           # remaining
 
-  sleep 1.0
+  sleep 0.2
   printf "*"
-  sleep 1.0
+  sleep 0.2
   printf "1"
-  sleep 1.0
+  sleep 0.2
   printf "\r"
-  sleep 1.0
+  sleep 0.2
   printf "\n"
-  sleep 1.0
+  sleep 0.2
   printf "\$"
-  sleep 1.0
+  sleep 0.2
   printf "4"
-  sleep 1.0
+  sleep 0.2
   printf "\r"
-  sleep 1.0
+  sleep 0.2
   printf "\n"
-  sleep 1.0
+  sleep 0.2
   printf "P"
-  sleep 1.0
+  sleep 0.2
   printf "I"
-  sleep 1.0
+  sleep 0.2
   printf "N"
-  sleep 1.0
+  sleep 0.2
   printf "G"
-  sleep 1.0
+  sleep 0.2
   printf "\r"
-  sleep 1.0
+  sleep 0.2
   printf "\n"
 
   # ECHO "Hello There! General Kenobiii!"
   printf "*2\r\n"
-  sleep 1.0
+  sleep 0.2
   printf "\$4\r"
-  sleep 1.0
+  sleep 0.2
   printf "\n"
-  sleep 1.0
+  sleep 0.2
   printf "E"
   printf "CHO\r\n"
-  sleep 1.0
+  sleep 0.2
   printf "\$32\r\n"
-  sleep 1.0
+  sleep 0.2
   printf '"Hello There! '
-  sleep 1.0
+  sleep 0.2
   printf 'General Kenobiii!"'
   printf "\r\n"
+
+  # Test SET, *3\r\n$3\r\nSET\r\n$3\r\nfoo$3\r\nbar\r\n
+  printf "*3\r\n\$3\r\nSET\r\n\$3\r\nfoo\r\n\$3\r\nbar\r\n"
+
+  # Test GET
+  printf "*2\r\n\$3\r\nGET\r\n\$3\r\nfoo\r\n"
+
+  # Test GET error
+  printf "*2\r\n\$3\r\nGET\r\n\$3\r\nbar\r\n"
+
 } | nc localhost 6379

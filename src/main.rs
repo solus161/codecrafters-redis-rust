@@ -1,9 +1,11 @@
 #![allow(unused_imports)]
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::{ TcpListener, TcpStream };
-use std::io::{self, BufRead, BufReader, Error, ErrorKind, Read, Write};
+use std::io::{self, BufRead, BufReader, Error, ErrorKind, Read, Write}; 
 use std::os::fd::{AsRawFd, RawFd};
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::str::from_utf8;
 use libc;
 
@@ -14,6 +16,7 @@ mod cmd_handler;
 mod client;
 
 use crate::client::{TcpClient, BUFFER_SIZE};
+use crate::cmd_handler::CmdHandler;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Uncomment the code below to pass the first stage
@@ -21,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     listener.set_nonblocking(true).unwrap();
     let listener_fd = listener.as_raw_fd();
     let listener_fd_u64 = listener_fd as u64;
+    let cmd_handler = Rc::new(RefCell::new(CmdHandler::new()));
 
     // Get fd on epoll event
     let epoll_fd = epoll::epoll_create().expect("Error creating epoll queue");
@@ -67,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 epoll::get_epoll_event_read(stream_key as u64))?;
                             clients.insert(
                                 stream_key.try_into().unwrap(),
-                                TcpClient::new(stream));
+                                TcpClient::new(stream, Rc::clone(&cmd_handler)));
                             // println!("Registered epoll with key {}", stream_key);
                         },
                         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {eprintln!("{}", e)},
@@ -103,7 +107,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Err(boxed_e) => {
                                         println!("Error with client fd {}: {:?}", key, boxed_e);
                                         disconnected = true;
-                                        
                                     }
                                 };
 
