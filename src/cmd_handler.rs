@@ -54,7 +54,7 @@ impl CmdHandler {
     }
 
     fn response_ok() -> String {
-        "+Ok\r\n".to_string()
+        "+OK\r\n".to_string()
     }
 
     fn cmd_ping() -> Option<String> {
