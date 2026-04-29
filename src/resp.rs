@@ -41,8 +41,6 @@ impl RespParser {
 
     pub fn parse(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         loop {
-            thread::sleep(Duration::from_millis(50));
-
             // Check if top stack is is_completed
             self.pop_completed();
 
