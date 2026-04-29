@@ -6,46 +6,26 @@ use std::net::TcpStream;
 use std::rc::Rc;
 use std::str::from_utf8;
 
-use crate::cmd_handler::CmdHandler;
-
-#[derive(Debug)]
-pub enum ParsingStatus {
-    ArgsCount(String),
-    ArgLen(String),
-    Arg{ arg: String, len: usize },
-    Delimiter(Box<ParsingStatus>),
-    None,
-}
-
-#[derive(Debug)]
-pub enum ArgCompleted {
-    Completed(String),
-    Incompleted(String)
-}
+use crate::cmd_handler::{Cmd, CmdHandler};
+use crate::resp::{ RespType, RespParser };
 
 #[derive(Debug)]
 pub struct TcpClient {
     pub stream: TcpStream,
-    pub buf: VecDeque<u8>,
-    pub args: Vec<String>,
-    pub args_count: usize, // total args count in RESP header
-    pub parsing_status: ParsingStatus,
+    pub resp_parser: RespParser,
     pub cmd_handler: Rc<RefCell<CmdHandler>>,
 }
 
-const DELIMITER: &str = "\r\n";
 pub const BUFFER_SIZE: i32 = 4096;
 
-
 impl TcpClient {
-    pub fn new(stream: TcpStream, cmd_handler: Rc<RefCell<CmdHandler>>) -> Self {
+    pub fn new(
+        stream: TcpStream, 
+        cmd_handler: Rc<RefCell<CmdHandler>>) -> Self {
         Self {
-            stream,
-            buf: VecDeque::new(),
-            args: Vec::new(), // splitted stream based on \r\n
-            args_count: 0,
-            parsing_status: ParsingStatus::None,
-            cmd_handler
+            stream: stream,
+            resp_parser: RespParser::new(),
+            cmd_handler: cmd_handler,
         }
     }
 
@@ -63,232 +43,28 @@ impl TcpClient {
 
         // Push tmp_buf into current buf
         //println!("Current buf before append: {:?}", &self.buf);
-        self.buf.append(&mut VecDeque::from(tmp_buf[..n].to_vec()));
+        self.resp_parser.feed_buf(&tmp_buf, n);
         //println!("Current buf after append: {:?}", &self.buf);
         
-        self.parse_stream()
-    }
-
-    fn parse_stream(&mut self) -> Result<(), Box<dyn error::Error>> {
-        // Parsing is now easier as working with Python list
-        // Parse all the data of 128 bytes
+        // Parse stream
+        self.resp_parser.parse()?;
         
+        // Proccess command
         loop {
-            if self.buf.is_empty() {
-                return Ok(())
-            };
-            
-            println!("Buf {:?}", &self.buf);
-            
-            // Cannot move out of struct so have to replace with None
-            let parsing_status = std::mem::replace(
-                &mut self.parsing_status, ParsingStatus::None);
-            match parsing_status {
-                // Not parsing anything
-                ParsingStatus::None => {
-                    // Consume until "*"
-                    while self.buf.len() > 0 {
-                        if self.buf[0] == b'*'{
-                            println!("Detect *");
-                            self.parsing_status = ParsingStatus::ArgsCount(String::new());
-                            break;
-                        } else {
-                            self.buf.pop_front().unwrap();
-                        }
-                    }; 
-                },
-                ParsingStatus::Delimiter(boxed) => {
-                        // self.parsing_status = ParsingStatus::Delimiter(boxed);
-                    if self.buf.len() >= 2 {
-                        // Consume delimiters
-                        let slice: Vec<u8> = self.buf.iter().take(2).copied().collect();
-                        match from_utf8(&slice) {
-                            Ok(delimiter) => {
-                                // println!("Trying to parse delimiter {:?}", &delimiter.as_bytes());
-                                if delimiter == DELIMITER {
-                                    self.buf.drain(..2);
-                                } else {
-                                    return Err(Box::new(io::Error::new(
-                                        io::ErrorKind::InvalidData,
-                                        format!("Error parsing delimiter \r\n, got {}", &delimiter)
-                                    )))
-                                }
-                            },
-                            Err(e) => {
-                                return Err(Box::new(io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!("Error parsing delimiter \r\n: {}", e)
-                                )))
-                            },
-                        }
-                    } else {
-                        self.parsing_status = ParsingStatus::Delimiter(boxed);
-                        return Ok(());
-                    };
-
-                    // The delimiter must followed by st else, st valid
-                    match *boxed {
-                        // The delimiter could followed by another delimiter
-                        ParsingStatus::ArgLen(_) => {
-                            self.parsing_status = ParsingStatus::ArgLen(String::new());
-                            //self.buf.pop_front();
-                        },
-                        ParsingStatus::Arg{ arg, len } => {
-                           self.parsing_status = ParsingStatus::Arg{ arg, len };
-                        },
-                        _ => {
-                            return Err(Box::new(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "Error parsing delimiter"
-                            )))
-                        }
-                    };
-                },
-                ParsingStatus::ArgsCount(arg) => {
-                    println!("ArgsCount: {}", &arg);
-                    match self.parse_digit(arg, '*') {
-                        Ok(arg) => {
-                            match arg {
-                                ArgCompleted::Incompleted(arg) => {
-                                    self.parsing_status = ParsingStatus::ArgsCount(arg);
-                                    return Ok(());
-                                },
-                                ArgCompleted::Completed(arg) => {
-                                    self.args_count = arg.parse::<usize>()?;
-                                    self.parsing_status = ParsingStatus::Delimiter(
-                                        Box::new(
-                                            ParsingStatus::ArgLen(String::new())
-                                        )
-                                    );
-                                },
-                            }
-                        },
-                        Err(e) => {
-                            return Err(Box::new(e));
-                        }
+            match self.resp_parser.get_completed() {
+                Some(t) => {
+                    let cmd = Cmd::from_resp(t).unwrap();
+                    println!("Cmd completed: {:?}", cmd);
+                    // TODO: handle None cmd
+                    if let Some(r) = self.cmd_handler.borrow_mut().handle(cmd) {
+                        println!("Response as bytes: {:?}", r.as_bytes());
+                        self.stream.write_all(r.as_bytes())?
                     }
                 },
-                ParsingStatus::ArgLen(arg) => {
-                    println!("ArgLen: {}", arg);
-                    match self.parse_digit(arg, '$') {
-                        Ok(arg) => {
-                            match arg {
-                                ArgCompleted::Incompleted(arg) => {
-                                    self.parsing_status = ParsingStatus::ArgLen(arg);
-                                    return Ok(());
-                                },
-                                ArgCompleted::Completed(arg) => {
-                                    self.parsing_status = ParsingStatus::Delimiter(
-                                        Box::new(ParsingStatus::Arg{
-                                            arg: String::new(),
-                                            len: arg.parse::<usize>()?,
-                                        })
-                                    )
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            return Err(Box::new(e));
-                        },
-                    }
-                },
-                ParsingStatus::Arg{ arg, len } => {
-                    println!("Arg {} {}", arg, len);
-                    match self.parse_arg(arg, len) {
-                        Ok(arg) => {
-                            match arg {
-                                ArgCompleted::Incompleted(arg) => {
-                                    println!("Incompleted Arg {}", arg);
-                                    self.parsing_status = ParsingStatus::Arg{ arg, len };
-                                    return Ok(());
-                                },
-                                ArgCompleted::Completed(arg) => {
-                                    println!("Completed Arg {}", arg);
-                                    self.args.push(arg);
-                                    println!("Args {:?}", &self.args);
-                                    if self.args.len() == self.args_count {
-                                        // All args parsed
-                                        let _ = self.response();
-                                        self.args_count = 0;
-                                        self.parsing_status = ParsingStatus::None;
-                                    } else {
-                                        self.parsing_status = ParsingStatus::Delimiter(
-                                            Box::new(ParsingStatus::ArgLen(String::new()))
-                                        );
-                                    }
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            return Err(Box::new(e));
-                        }
-                    }
-                },
+                None => break,
             }
-        }
-    }
-
-    fn response(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Response based on args
-        let args = std::mem::replace(&mut self.args, Vec::<String>::new());
-        match self.cmd_handler.borrow_mut().handle(args) {
-            Some(output_str) => {
-                println!("Stream write: {}", &output_str);
-                let _ = self.stream.write_all(output_str.as_bytes());
-                Ok(())
-            },
-            None => Ok(()),
-        }
-    }
-
-    fn parse_digit(&mut self, mut arg: String, prefix: char) -> Result<ArgCompleted, io::Error> {
-        // Digit must start with $, else error
-        // and end with \r\n
-        //println!("Buf before parsing digit {:?}", &self.buf);
-        if self.buf.is_empty() {
-            Ok(ArgCompleted::Incompleted(arg))
-        } else {
-            if arg.is_empty() {
-                if self.buf[0] != prefix as u8 {
-                    return Err(
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "Error parsing digit, starting char must be {}, got {}", 
-                                prefix as char, self.buf[0] as char)));
-                } else {
-                    arg.push(self.buf.pop_front().unwrap() as char);
-                };
-            };
-
-            while self.buf.len() > 0  {
-                if self.buf[0].is_ascii_digit() {
-                    arg.push(self.buf.pop_front().unwrap() as char);
-                } else {
-                    arg.drain(..1);
-                    return Ok(ArgCompleted::Completed(arg));
-                }
-            };
-            Ok(ArgCompleted::Incompleted(arg))
-        }
-    }
-
-    fn parse_arg(&mut self, mut arg: String, len: usize) -> Result<ArgCompleted, io::Error> {
-        //println!("Buf {:?}", &self.buf);
-        if self.buf.is_empty() {
-            Ok(ArgCompleted::Incompleted(arg))
-        } else {
-            let remaining_len = (len - arg.len()).min(self.buf.len());
-            println!("Remaining len {}", &remaining_len);
-            let remaining_bytes = self.buf.drain(..remaining_len).collect::<Vec<u8>>();
-            println!("Arg before push_str {}", &arg);
-            arg.push_str(from_utf8(&remaining_bytes).unwrap().trim_end_matches('\0'));
-            println!("Arg after push_str {}", &arg);
-            if arg.len() == len {
-                Ok(ArgCompleted::Completed(arg))
-            } else {
-                Ok(ArgCompleted::Incompleted(arg))
-            }
-        }
+        };
+        println!{"Remaining tmp buf: {:?}", &self.resp_parser.tmp};
+        Ok(())
     }
 }

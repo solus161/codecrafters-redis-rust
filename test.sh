@@ -1,7 +1,9 @@
 #!/bin/bash
 {
-  #printf "*2\r\n\$4\r\nECHO\r\n\$5\r\ngrape\r\n"
+  # ECHO grape
   printf "*2\r\n\$4\r\nECHO\r\n\$6\r\nbanana\r\n"
+  
+  # PING
   printf "*1\r\n\$4\r\nPI"  # partial
   sleep 0.2
   printf "NG\r\n"           # remaining
@@ -52,13 +54,13 @@
   printf 'General Kenobiii!"'
   printf "\r\n"
 
-  # Test SET, *3\r\n$3\r\nSET\r\n$3\r\nfoo$3\r\nbar\r\n
+  # SET foo bar
   printf "*3\r\n\$3\r\nSET\r\n\$3\r\nfoo\r\n\$3\r\nbar\r\n"
 
-  # Test GET
+  # GET foo
   printf "*2\r\n\$3\r\nGET\r\n\$3\r\nfoo\r\n"
 
-  # Test GET error
+  # GET bar
   printf "*2\r\n\$3\r\nGET\r\n\$3\r\nbar\r\n"
 
 } | nc localhost 6379

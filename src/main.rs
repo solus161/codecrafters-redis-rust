@@ -14,8 +14,11 @@ mod utils;
 mod epoll;
 mod cmd_handler;
 mod client;
+mod resp;
+mod tests;
 
 use crate::client::{TcpClient, BUFFER_SIZE};
+use crate::resp::RespParser;
 use crate::cmd_handler::CmdHandler;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -71,7 +74,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 epoll::get_epoll_event_read(stream_key as u64))?;
                             clients.insert(
                                 stream_key.try_into().unwrap(),
-                                TcpClient::new(stream, Rc::clone(&cmd_handler)));
+                                TcpClient::new(
+                                    stream, 
+                                    Rc::clone(&cmd_handler)));
                             // println!("Registered epoll with key {}", stream_key);
                         },
                         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {eprintln!("{}", e)},
