@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::io;
 use std::collections::VecDeque;
 use std::str;
@@ -36,7 +38,7 @@ impl RespParser {
 
     pub fn feed_buf(&mut self, data: &[u8], n: usize) {
         self.buf.append(&mut VecDeque::from(data[..n].to_vec()));
-        println!("Parser read to buf: {:?}", &data[..n]);
+        // println!("Parser read to buf: {:?}", &data[..n]);
     }
 
     pub fn parse(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -45,7 +47,7 @@ impl RespParser {
             self.pop_completed();
 
             if self.buf.is_empty() {
-                println!("Parser buf emtpy");
+                // println!("Parser buf emtpy");
                 return Ok(());
             };
             
@@ -59,18 +61,18 @@ impl RespParser {
                     // - pop off stack, 
                     // - push down to next top opened type
                     // - or processed by handler
-                    println!("Parsing Type");
+                    // println!("Parsing Type");
                     match self.next_till_type() {
                         Some(resp_type) => {
                             self.stack.push(resp_type);
                             if let Some(top) = self.stack.last() {
                                 match top {
                                     RespType::Array {..} | RespType::BulkStr {..} => {
-                                        println!("Found array-like type");
+                                        // println!("Found array-like type");
                                         self.status = ParseStatus::Header;
                                     },
                                     RespType::SimpleStr(..) | RespType::Integer(..) => {
-                                        println!("Found simple and scalar type");
+                                        // println!("Found simple and scalar type");
                                         self.status = ParseStatus::Line;
                                     },
                                     _ => {
@@ -87,13 +89,13 @@ impl RespParser {
                 ParseStatus::Header => {
                     // scan till \r\n
                     // save result to object at top of stack
-                    println!("Parsing Header");
+                    // println!("Parsing Header");
                     match self.next_till_new_line() {
                         Some(s) => {
                             // This String s will be consumed by top stack resp type
                             // which has length attr
                             if let Some(top) = self.stack.last_mut() {
-                                println!("{}", &s);
+                                // println!("{}", &s);
                                 let length: usize = s.parse()?;
                                 top.set_length(length);
 
@@ -121,12 +123,12 @@ impl RespParser {
                 },
                 ParseStatus::Line => {
                     // scan till \r\n, work with types with no length attr
-                    println!("Parsing Line");
+                    // println!("Parsing Line");
                     match self.next_till_new_line() {
                         Some(s) => {
                             if let Some(top) = self.stack.last_mut() {
                                 // TODO: handle converting to i64
-                                top.set_value(s);
+                                top.set_value(s)?;
                                 self.status = ParseStatus::Type;
                             }
                         },
@@ -140,13 +142,13 @@ impl RespParser {
                 ParseStatus::Bulk(n) => {
                     // read n bytes
                     // e.g. PONG\r\n
-                    println!("Parsing Bulk");
+                    // println!("Parsing Bulk");
                     match self.read_bytes(n) {
                         Ok(o) => {
                             match o {
                                 Some(s) => {
                                     if let Some(top) = self.stack.last_mut() {
-                                        top.set_value(s);
+                                        top.set_value(s)?;
                                         self.status = ParseStatus::Type;
                                     };
 
@@ -156,9 +158,9 @@ impl RespParser {
                                 },
                             }
                         },
-                        Err(e) => {
+                        Err(__) => {
                             // TODO: handling error
-                            println!("{}", e);
+                            // println!("{}", e);
                         }
                     }
                 },
@@ -184,7 +186,7 @@ impl RespParser {
                     let completed_type = self.stack.pop().unwrap();
                     if self.stack.is_empty() {
                         // There is no more than stack of 2 scalar/simple types
-                        println!("Completed: {:?}", &completed_type);
+                        // println!("Completed: {:?}", &completed_type);
                         self.completed.push_back(completed_type);
                     } else {
                         // The next top must be of array type
@@ -224,7 +226,7 @@ impl RespParser {
 
     fn next_till_new_line(&mut self) -> Option<String> {
         // Consume buf till getting new line \r\n
-        println!("Head 5 buff: {:?}", self.buf.iter().take(5).collect::<Vec<_>>());
+        // println!("Head 5 buff: {:?}", self.buf.iter().take(5).collect::<Vec<_>>());
         while self.buf.len() >= 2 {
             if self.buf[0] == b'\r' && self.buf[1] == b'\n' {
                 let output: Vec<u8> = self.tmp.drain(..).collect();
@@ -447,7 +449,7 @@ impl RespType {
             },
             _ => {
                 // Not implemented yet
-                Ok(())
+                Err("Not implemented".into())
             }
         }
     }

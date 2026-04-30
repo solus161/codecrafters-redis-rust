@@ -13,6 +13,28 @@ const KW_GET: &str = "GET";
 const KW_PX: &str = "PX";
 const KW_EX: &str = "EX";
 
+//-------Customed error for command construction
+pub enum CmdError {
+    InvalidArgument(String),
+    MissingArgument(String),
+    ParseError(String),
+    NoCmdError,
+    ParseIntError(String),
+    UnsupportedCmdStructure,
+}
+
+impl std::fmt::Display for CmdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::InvalidArgument(msg) => write!(f, "{}", msg),
+            Self::MissingArgument(msg) => write!(f, "{}", msg),
+            Self::ParseError(msg) => write!(f, "Error parsing {}", msg),
+            Self::NoCmdError => write!(f, "No command found"),
+            Self::ParseIntError(msg) => write!(f, "Error parsing int value {}", msg),
+            Self::UnsupportedCmdStructure => write!(f, "Unsupported command structure"),
+        }
+    }
+}
 
 
 //-------Command, struct and parser
@@ -25,55 +47,73 @@ pub enum Cmd {
 }
 
 impl Cmd {
-    fn ping() -> Option<Self> { Some(Self::PING) }
-    fn echo(mut values: VecDeque<RespType>) -> Option<Self> {
-        let s: String = values.pop_front()?.get_value()?.str()?;
-        return Some(Self::ECHO(s));
+    fn ping() -> Result<Self, CmdError> { Ok(Self::PING) }
+    fn echo(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let s: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument(
+                    "No argument provided for ECHO".to_string()))?
+            .get_value()
+            .ok_or(CmdError::ParseError("ECHO".to_string()))?
+            .str()
+            .ok_or(CmdError::ParseError("ECHO".to_string()))?;
+        return Ok(Self::ECHO(s));
     }
     
-    fn set(mut values: VecDeque<RespType> ) -> Option<Self> {
-        let key: String = values.pop_front()?.get_value()?.str()?; 
-        let value: String = values.pop_front()?.get_value()?.str()?;
+    fn set(mut values: VecDeque<RespType> ) -> Result<Self, CmdError> {
+        let key: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No key provided for SET".to_string()))?
+            .get_value().unwrap()
+            .str().unwrap();
+
+        let value: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No value provided for SET".to_string()))?
+            .get_value().unwrap()
+            .str().unwrap();
+
         match values.pop_front() {
             // Having option
             Some(o) => {
-                let expire_key: String = o.get_value()?.str()?;        
+                let expire_key: String = o.get_value().unwrap().str().unwrap();        
                 let expire_value: u64 = match values.pop_front() {
                     Some(o) => {
                         // TODO: handle conversion error
-                        o.get_value()?.str()?.parse::<u64>().ok()?
+                        o.get_value().unwrap().str().unwrap()
+                            .parse::<u64>()
+                            .map_err(|_| CmdError::ParseError("expiration value".to_string()))?
                     },
-                    None => return None
+                    None => return Err(CmdError::MissingArgument("No expiration provided".to_string()))
                 };
-                let opt = CmdOption::set(expire_key, expire_value)?;
-                Some(Self::SET{ key: key, value: value, opt: Some(opt) })
+                let opt = CmdOption::set(expire_key, expire_value)
+                    .ok_or(CmdError::ParseIntError("SET".to_string()))?;
+                Ok(Self::SET{ key: key, value: value, opt: Some(opt) })
             },
             // Have no option
-            None => Some(Self::SET{ key: key, value: value, opt: None })
+            None => Ok(Self::SET{ key: key, value: value, opt: None })
         }
     }
 
-    fn get(mut values: VecDeque<RespType>) -> Option<Self>{
-        let key: String = values.pop_front()?.get_value()?.str()?;
-        Some(Cmd::GET{ key })
+    fn get(mut values: VecDeque<RespType>) -> Result<Self, CmdError>{
+        let key: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No key provided for GET".to_string()))?
+            .get_value().unwrap().str().unwrap();
+        Ok(Cmd::GET{ key })
     }
 
-    pub fn from_resp(resp_type: RespType) -> Option<Self> {
+    pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
             RespType::Array{ length, value } => {
                 // Iterate through the array to construct Cmd
                 // A command is always in array form
-                if length == 0 { return None };
+                if length == 0 { return Err(CmdError::NoCmdError) };
 
                 // First item must be cmd type
                 if  let Some(mut v) = value {
                     match v.pop_front() {
                         Some(o) => {
-                            println!("Cmd: {:?}", &o);
                             match o {
                                 RespType::BulkStr { length, value } => {
-                                    if length == 0 { return None };
+                                    if length == 0 { return Err(CmdError::NoCmdError) };
 
                                     match value.unwrap().to_uppercase() {
                                         s if s == KW_PING.to_string() => {
@@ -88,19 +128,18 @@ impl Cmd {
                                         s if s == KW_GET.to_string() => {
                                             return Self::get(v);
                                         }
-                                        _ => return None
+                                        _ => return Err(CmdError::InvalidArgument("Invalid command".to_string()))
                                     } 
-                                }
-                                _ => return None
+                                },
+                                _ => return Err(CmdError::InvalidArgument("Invalid command".to_string()))
                             }            
                         },
-                        None => return None
+                        None => return Err(CmdError::NoCmdError) 
                     };
                 };
-
-                return None;
+                return Err(CmdError::NoCmdError);
             },
-            _ => return None,
+            _ => return Err(CmdError::UnsupportedCmdStructure),
         }
     }
 }
@@ -116,7 +155,6 @@ impl CmdOption {
         match Self::match_key(key)? {
             Self::EX(_) => Some(Self::EX(Some(value))),
             Self::PX(_) => Some(Self::PX(Some(value))),
-            _ => None  
         }
     }
 
@@ -144,13 +182,17 @@ impl CmdHandler {
         Self { data: HashMap::new() }
     }
 
-    pub fn handle(&mut self, cmd: Cmd) -> Option<String> {
+    pub fn handle(&mut self, cmd: Result<Cmd, CmdError>) -> Option<String> {
         match cmd {
-            Cmd::PING => Self::cmd_ping(),
-            Cmd::ECHO(s) => Self::cmd_echo(s),
-            Cmd::SET{ key, value, opt } => self.cmd_set(key, value, opt),
-            Cmd::GET{ key } => self.cmd_get(key),
-            _ => None
+            Ok(c) => {
+                match c {
+                    Cmd::PING => Self::cmd_ping(),
+                    Cmd::ECHO(s) => Self::cmd_echo(s),
+                    Cmd::SET{ key, value, opt } => self.cmd_set(key, value, opt),
+                    Cmd::GET{ key } => self.cmd_get(key),
+                }
+            },
+            Err(e) => Self::cmd_err(e.to_string())
         } 
     }
     
@@ -170,6 +212,10 @@ impl CmdHandler {
 
     fn cmd_echo(s: String) -> Option<String> {
         RespType::BulkStr{ length: s.len(), value: Some(s) }.serialize() 
+    }
+
+    fn cmd_err(s: String) -> Option<String> {
+        RespType::SimpleStr(Some(s)).serialize()
     }
 
     fn cmd_set(&mut self, key: String, value: String, opt: Option<CmdOption>) -> Option<String> {
