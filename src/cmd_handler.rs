@@ -12,8 +12,10 @@ const KW_SET: &str = "SET";
 const KW_GET: &str = "GET";
 const KW_PX: &str = "PX";
 const KW_EX: &str = "EX";
+const KW_RPUSH: &str = "RPUSH";
 
 //-------Customed error for command construction
+#[derive(Debug)]
 pub enum CmdError {
     InvalidArgument(String),
     MissingArgument(String),
@@ -44,6 +46,7 @@ pub enum Cmd {
     ECHO(String),
     SET { key: String, value: String, opt: Option<CmdOption>  },
     GET { key: String },
+    RPUSH { key: String, value: Vec<String> },
 }
 
 impl Cmd {
@@ -99,6 +102,23 @@ impl Cmd {
         Ok(Cmd::GET{ key })
     }
 
+    fn rpush(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let key: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No key provided for RPUSH".to_string()))?
+            .get_value().unwrap().str().unwrap();
+        
+        let mut list_values: Vec<String> = Vec::new();
+        while !values.is_empty() {
+            // Pop from values, extract String, push to list_values
+            let v = values.pop_front()
+                .ok_or(CmdError::MissingArgument("No value provided for RPUSH".to_string()))?
+                .get_value().unwrap()
+                .str().unwrap();
+            list_values.push(v);
+        };
+        Ok(Cmd::RPUSH { key, value: list_values })
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -127,7 +147,10 @@ impl Cmd {
                                         },
                                         s if s == KW_GET.to_string() => {
                                             return Self::get(v);
-                                        }
+                                        },
+                                        s if s == KW_RPUSH.to_string() => {
+                                            return Self::rpush(v);
+                                        },
                                         _ => return Err(CmdError::InvalidArgument("Invalid command".to_string()))
                                     } 
                                 },
@@ -174,12 +197,16 @@ struct HashItem { value: String, expired_at: Option<u64> }
 //---------Command handler, convert Cmd struct into action
 #[derive(Debug)]
 pub struct CmdHandler {
-    data: HashMap<String, HashItem>
+    hashes: HashMap<String, HashItem>,
+    lists: HashMap<String, VecDeque<String>>,
 }
 
 impl CmdHandler {
     pub fn new() -> Self{
-        Self { data: HashMap::new() }
+        Self { 
+            hashes: HashMap::new(),
+            lists: HashMap::new(),
+        }
     }
 
     pub fn handle(&mut self, cmd: Result<Cmd, CmdError>) -> Option<String> {
@@ -190,6 +217,7 @@ impl CmdHandler {
                     Cmd::ECHO(s) => Self::cmd_echo(s),
                     Cmd::SET{ key, value, opt } => self.cmd_set(key, value, opt),
                     Cmd::GET{ key } => self.cmd_get(key),
+                    Cmd::RPUSH{ key, value } => self.cmd_rpush(key, value),
                 }
             },
             Err(e) => Self::cmd_err(e.to_string())
@@ -232,15 +260,15 @@ impl CmdHandler {
                 }
             };
 
-            self.data.insert(key, HashItem { value: value, expired_at: exp });
+            self.hashes.insert(key, HashItem { value: value, expired_at: exp });
         } else {
-            self.data.insert(key, HashItem { value: value, expired_at: None });
+            self.hashes.insert(key, HashItem { value: value, expired_at: None });
         }
         Self::response_ok()
     }
 
     fn cmd_get(&self, key: String) -> Option<String> {
-        match self.data.get(&key) {
+        match self.hashes.get(&key) {
             Some(v) => {
                 // Check for expiration
                 let expired = v.expired_at.map_or(false, |x| Self::now() > x);
@@ -253,5 +281,11 @@ impl CmdHandler {
             // No key found
             None => RespType::BulkStr{ length: 0, value: None }.serialize(),
         } 
+    }
+
+    fn cmd_rpush(&mut self, key: String, value: Vec<String>) -> Option<String> {
+        let list = self.lists.entry(key).or_insert_with(VecDeque::new);
+        list.extend(value);
+        RespType::Integer(Some(list.len() as i64)).serialize()
     }
 }

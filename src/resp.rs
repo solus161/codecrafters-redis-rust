@@ -521,6 +521,12 @@ impl RespType {
                     None => None,
                 }
             },
+            Self::Integer(o) => {
+                match o {
+                    Some(x) => Some(format!("{}{}{}", &prefix, x, DELIMITER)),
+                    None => None,
+                }
+            },
             _ => {
                 return None
             }

@@ -54,6 +54,7 @@ impl TcpClient {
             match self.resp_parser.get_completed() {
                 Some(t) => {
                     let cmd = Cmd::from_resp(t);
+                    println!("Cmd completed: {:?}", &cmd);
                     if let Some(r) = self.cmd_handler.borrow_mut().handle(cmd) {
                         println!("Response as bytes: {:?}", r.as_bytes());
                         self.stream.write_all(r.as_bytes())?
