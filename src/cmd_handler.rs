@@ -14,6 +14,7 @@ const KW_PX: &str = "PX";
 const KW_EX: &str = "EX";
 const KW_RPUSH: &str = "RPUSH";
 const KW_LRANGE: &str = "LRANGE";
+const KW_LPUSH: &str = "LPUSH";
 
 //-------Customed error for command construction
 #[derive(Debug)]
@@ -49,6 +50,7 @@ pub enum Cmd {
     GET { key: String },
     RPUSH { key: String, value: Vec<String> },
     LRANGE{ key: String, start: i64, stop: i64},
+    LPUSH { key: String, value: Vec<String> },
 }
 
 impl Cmd {
@@ -145,6 +147,23 @@ impl Cmd {
                     "end index for LRANGE".to_string()))?;
         Ok(Self::LRANGE { key, start, stop })
     }
+    
+    fn lpush(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let key: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No key provided for LPUSH".to_string()))?
+            .get_value().unwrap().str().unwrap();
+        
+        let mut list_values: Vec<String> = Vec::new();
+        while !values.is_empty() {
+            // Pop from values, extract String, push to list_values
+            let v = values.pop_front()
+                .ok_or(CmdError::MissingArgument("No value provided for LPUSH".to_string()))?
+                .get_value().unwrap()
+                .str().unwrap();
+            list_values.push(v);
+        };
+        Ok(Cmd::LPUSH { key, value: list_values })
+    }
 
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
@@ -181,7 +200,11 @@ impl Cmd {
                                         s if s == KW_LRANGE.to_string() => {
                                             return Self::lrange(v);
                                         },
-                                        _ => return Err(CmdError::InvalidArgument("Invalid command".to_string()))
+                                        s if s == KW_LPUSH.to_string() => {
+                                            return Self::lpush(v);
+                                        },
+                                        _ => return Err(
+                                            CmdError::InvalidArgument("Invalid command".to_string()))
                                     } 
                                 },
                                 _ => return Err(CmdError::InvalidArgument("Invalid command".to_string()))
@@ -249,6 +272,7 @@ impl CmdHandler {
                     Cmd::GET{ key } => self.cmd_get(key),
                     Cmd::RPUSH{ key, value } => self.cmd_rpush(key, value),
                     Cmd::LRANGE { key, start, stop } => self.cmd_lrange(key, start, stop),
+                    Cmd::LPUSH{ key, value } => self.cmd_lpush(key, value),
                 }
             },
             Err(e) => Self::cmd_err(e.to_string())
@@ -357,7 +381,6 @@ impl CmdHandler {
                 let max_index = stop_abs.min(list.len() as i64 - 1) as usize;
                 let min_index = start_abs.min(list.len() as i64 - 1) as usize;
                 let output_len = max_index - min_index + 1;
-                println!("start {} stop {} start_abs {} stop_abs {} min {} max {}", start, stop, start_abs, stop_abs, min_index, max_index);
                 if output_len == 0 {
                     RespType::Array{ length: output_len, value: None}.serialize()
                 } else {
@@ -375,5 +398,13 @@ impl CmdHandler {
                 RespType::Array{ length: 0, value: None }.serialize()
             }
         }
+    }
+    
+    fn cmd_lpush(&mut self, key: String, value: Vec<String>) -> Option<String> {
+        let list = self.lists.entry(key).or_insert_with(VecDeque::new);
+        for v in value {
+            list.push_front(v)
+        };
+        RespType::Integer(Some(list.len() as i64)).serialize()
     }
 }

@@ -93,4 +93,11 @@
   
   # LRANGE list_key1 -7 -1 => a b c d e f
   printf "*4\r\n\$6\r\nLRANGE\r\n\$9\r\nlist_key1\r\n\$2\r\n-7\r\n\$2\r\n-1\r\n"
+  
+  # LPUSH list_key2 a b c
+  printf "*5\r\n\$5\r\nLPUSH\r\n\$9\r\nlist_key2\r\n\$1\r\na\r\n\$1\r\nb\r\n\$1\r\nc\r\n"
+
+  # LRANGE list_key2 0 -1 => c b a
+  printf "*4\r\n\$6\r\nLRANGE\r\n\$9\r\nlist_key2\r\n\$1\r\n0\r\n\$2\r\n-1\r\n"
+
 } | nc localhost 6379
