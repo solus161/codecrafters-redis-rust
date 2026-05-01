@@ -69,18 +69,18 @@
   # LRANGE list_key_none 0 1 => empty array
   printf "*4\r\n\$6\r\nLRANGE\r\n\$13\r\nlist_key_none\r\n\$1\r\n0\r\n\$1\r\n0\r\n"
   
-  # RPUSH list_key1 a b c d e
-  printf "*7\r\n\$5\r\nRPUSH\r\n\$9\r\nlist_key1\r\n\$1\r\na\r\n\$1\r\nb\r\n"
-  printf "\$1\r\nc\r\n\$1\r\nd\r\n\$1\r\ne\r\n"
+  # RPUSH list_key1 a b c d e f
+  printf "*8\r\n\$5\r\nRPUSH\r\n\$9\r\nlist_key1\r\n\$1\r\na\r\n\$1\r\nb\r\n"
+  printf "\$1\r\nc\r\n\$1\r\nd\r\n\$1\r\ne\r\n\$1\r\nf\r\n"
 
   # LRANGE list_key1 0 1
   printf "*4\r\n\$6\r\nLRANGE\r\n\$9\r\nlist_key1\r\n\$1\r\n0\r\n\$1\r\n1\r\n"
   
-  # LRANGE list_key1 2 4
-  printf "*4\r\n\$6\r\nLRANGE\r\n\$9\r\nlist_key1\r\n\$1\r\n2\r\n\$1\r\n4\r\n"
+  # LRANGE list_key1 3 5
+  printf "*4\r\n\$6\r\nLRANGE\r\n\$9\r\nlist_key1\r\n\$1\r\n3\r\n\$1\r\n5\r\n"
 
-  # LRANGE list_key1 5 7 => empty array
-  printf "*4\r\n\$6\r\nLRANGE\r\n\$9\r\nlist_key1\r\n\$1\r\n5\r\n\$1\r\n7\r\n"
+  # LRANGE list_key1 6 8 => empty array
+  printf "*4\r\n\$6\r\nLRANGE\r\n\$9\r\nlist_key1\r\n\$1\r\n6\r\n\$1\r\n8\r\n"
   
   # LRANGE list_key1 3 1 => empty array
   printf "*4\r\n\$6\r\nLRANGE\r\n\$9\r\nlist_key1\r\n\$1\r\n3\r\n\$1\r\n1\r\n"

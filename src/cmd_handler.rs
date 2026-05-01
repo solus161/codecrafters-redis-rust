@@ -328,19 +328,26 @@ impl CmdHandler {
         // Check valid key First
         match self.lists.get(&key) {
             Some(list) => {
-                println!("List {}: {:?}", &key, list);
+                if start > stop {
+                    return RespType::Array{ length: 0, value: None}.serialize()
+                };
+                
+                // VecDeque could wrap it self, so need this
+                if start as usize > list.len() - 1 {
+                    return RespType::Array{ length: 0, value: None}.serialize()
+                };
+
                 let max_index = (stop as usize).min(list.len() -1);
-                let min_index = (start as usize).min(max_index).max(0);
-                let output_len = max_index - min_index;
+                let min_index = (start as usize).min(list.len() - 1);
+                let output_len = max_index - min_index + 1;
                 if output_len == 0 {
-                    let output = RespType::Array{ length: output_len, value: None};
-                    output.serialize()
+                    RespType::Array{ length: output_len, value: None}.serialize()
                 } else {
                     let mut output = RespType::Array{
                         length: output_len,
                         value: Some(VecDeque::<RespType>::new())};
                     
-                    for i in list.iter().skip(min_index).take(max_index - min_index + 1){
+                    for i in list.iter().skip(min_index).take(output_len){
                         output.add_item(RespType::BulkStr { length: i.len(), value: Some(i.clone()) }); 
                     };
                     return output.serialize()
