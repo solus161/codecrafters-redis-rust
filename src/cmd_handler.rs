@@ -339,30 +339,30 @@ impl CmdHandler {
                 };
 
                 // Convert negative index to positive index
-                let start_abs: usize;
-                let stop_abs: usize;
+                let start_abs: i64;
+                let stop_abs: i64;
 
                 if start < 0 {
-                    start_abs = (list.len() + start as usize).max(0);
+                    start_abs = (list.len() as i64 + start).max(0);
                 } else {
-                    start_abs = start as usize;
+                    start_abs = start;
                 }
 
                 if stop < 0 {
-                    stop_abs = (list.len() + stop as usize).max(0);
+                    stop_abs = (list.len() as i64 + stop).max(0);
                 } else {
-                    stop_abs = stop as usize;
+                    stop_abs = stop;
                 };
 
-                let max_index = stop_abs.min(list.len() -1);
-                let min_index = start_abs.min(list.len() - 1);
+                let max_index = stop_abs.min(list.len() as i64 - 1) as usize;
+                let min_index = start_abs.min(list.len() as i64 - 1) as usize;
                 let output_len = max_index - min_index + 1;
                 println!("start {} stop {} start_abs {} stop_abs {} min {} max {}", start, stop, start_abs, stop_abs, min_index, max_index);
                 if output_len == 0 {
                     RespType::Array{ length: output_len, value: None}.serialize()
                 } else {
                     let mut output = RespType::Array{
-                        length: output_len,
+                        length: output_len as usize,
                         value: Some(VecDeque::<RespType>::new())};
                     
                     for i in list.iter().skip(min_index).take(output_len){
