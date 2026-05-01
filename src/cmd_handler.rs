@@ -16,6 +16,7 @@ const KW_RPUSH: &str = "RPUSH";
 const KW_LRANGE: &str = "LRANGE";
 const KW_LPUSH: &str = "LPUSH";
 const KW_LLEN: &str = "LLEN";
+const KW_LPOP: &str = "LPOP";
 
 //-------Customed error for command construction
 #[derive(Debug)]
@@ -53,6 +54,7 @@ pub enum Cmd {
     LRANGE{ key: String, start: i64, stop: i64},
     LPUSH { key: String, value: Vec<String> },
     LLEN(String),
+    LPOP(String),
 }
 
 impl Cmd {
@@ -174,6 +176,13 @@ impl Cmd {
         Ok(Cmd::LLEN(key))
     }
 
+    fn lpop(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let key: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No key provided for LPOP".to_string()))?
+            .get_value().unwrap().str().unwrap();
+        Ok(Cmd::LPOP(key))
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -214,6 +223,9 @@ impl Cmd {
                                         },
                                         s if s == KW_LLEN.to_string() => {
                                             return Self::llen(v);
+                                        },
+                                        s if s == KW_LPOP.to_string() => {
+                                            return Self::lpop(v);
                                         },
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))
@@ -286,6 +298,7 @@ impl CmdHandler {
                     Cmd::LRANGE { key, start, stop } => self.cmd_lrange(key, start, stop),
                     Cmd::LPUSH{ key, value } => self.cmd_lpush(key, value),
                     Cmd::LLEN(s) => self.cmd_llen(s),
+                    Cmd::LPOP(s) => self.cmd_lpop(s),
                 }
             },
             Err(e) => Self::cmd_err(e.to_string())
@@ -430,5 +443,25 @@ impl CmdHandler {
                 RespType::Integer(Some(0)).serialize()
             }
         }
+    }
+    
+    fn cmd_lpop(&mut self, key: String) -> Option<String> {
+        match self.lists.get_mut(&key) {
+            Some(list) => {
+                match list.pop_front() {
+                    Some(s) => {
+                        RespType::BulkStr {
+                            length: s.len(), value: Some(s)}.serialize()
+                    },
+                    None => {
+                        RespType::BulkStr {
+                            length: 0, value: None }.serialize()
+                    }
+                }
+            },
+            None => {
+                RespType::BulkStr { length: 0, value: None }.serialize()
+            }
+        }         
     }
 }

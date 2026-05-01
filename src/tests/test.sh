@@ -105,4 +105,11 @@
   
   # LLEN list_keyx => 0
   printf "*2\r\n\$4\r\nLLEN\r\n\$9\r\nlist_keyx\r\n"
+
+  # LPOP list_key2
+  printf "*2\r\n\$4\r\nLPOP\r\n\$9\r\nlist_key2\r\n"
+  
+  # LPOP list_keyx
+  printf "*2\r\n\$4\r\nLPOP\r\n\$9\r\nlist_keyx\r\n"
+
 } | nc localhost 6379
