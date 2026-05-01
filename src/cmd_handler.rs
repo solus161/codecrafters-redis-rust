@@ -54,7 +54,7 @@ pub enum Cmd {
     LRANGE{ key: String, start: i64, stop: i64},
     LPUSH { key: String, value: Vec<String> },
     LLEN(String),
-    LPOP(String),
+    LPOP{ key: String, length: Option<usize> },
 }
 
 impl Cmd {
@@ -180,7 +180,20 @@ impl Cmd {
         let key: String = values.pop_front()
             .ok_or(CmdError::MissingArgument("No key provided for LPOP".to_string()))?
             .get_value().unwrap().str().unwrap();
-        Ok(Cmd::LPOP(key))
+        
+        let length: Option<usize> = match values.pop_front() {
+            Some(s) => {
+                match s.get_value().unwrap().str().unwrap()
+                    .parse::<usize>() {
+                    Ok(x) => Some(x),
+                    Err(_) => return
+                        Err(CmdError::InvalidArgument("length for LPOP".to_string()))
+                    }
+            },
+            None => None
+        };
+
+        Ok(Cmd::LPOP{ key, length })
     }
 
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
@@ -298,7 +311,7 @@ impl CmdHandler {
                     Cmd::LRANGE { key, start, stop } => self.cmd_lrange(key, start, stop),
                     Cmd::LPUSH{ key, value } => self.cmd_lpush(key, value),
                     Cmd::LLEN(s) => self.cmd_llen(s),
-                    Cmd::LPOP(s) => self.cmd_lpop(s),
+                    Cmd::LPOP{ key, length } => self.cmd_lpop(key, length),
                 }
             },
             Err(e) => Self::cmd_err(e.to_string())
@@ -445,19 +458,33 @@ impl CmdHandler {
         }
     }
     
-    fn cmd_lpop(&mut self, key: String) -> Option<String> {
+    fn cmd_lpop(&mut self, key: String, length: Option<usize>) -> Option<String> {
         match self.lists.get_mut(&key) {
             Some(list) => {
-                match list.pop_front() {
-                    Some(s) => {
-                        RespType::BulkStr {
-                            length: s.len(), value: Some(s)}.serialize()
+                match length {
+                    Some(x) => {
+                        let take_nbr = x.min(list.len());
+                        let mut output = RespType::Array { length: take_nbr, value: None };
+                        for v in list.iter().take(take_nbr) {
+                            output.add_item(
+                                RespType::BulkStr { length: v.len(), value: Some(v.to_string()) }); 
+                        };
+                        output.serialize()
                     },
                     None => {
-                        RespType::BulkStr {
-                            length: 0, value: None }.serialize()
+                        match list.pop_front() {
+                            Some(s) => {
+                                RespType::BulkStr {
+                                    length: s.len(), value: Some(s)}.serialize()
+                            },
+                            None => {
+                                RespType::BulkStr {
+                                    length: 0, value: None }.serialize()
+                            }
+                        }
                     }
-                }
+                }   
+                
             },
             None => {
                 RespType::BulkStr { length: 0, value: None }.serialize()

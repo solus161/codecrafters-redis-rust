@@ -111,5 +111,10 @@
   
   # LPOP list_keyx
   printf "*2\r\n\$4\r\nLPOP\r\n\$9\r\nlist_keyx\r\n"
-
+  
+  # LPOP list_key2 3 => b c
+  printf "*3\r\n\$4\r\nLPOP\r\n\$9\r\nlist_keyx\r\n\$1\r\n3\r\n"
+  
+  # LPOP list_key1 => 0
+  printf "*3\r\n\$4\r\nLPOP\r\n\$9\r\nlist_key1\r\n\$1\r\n2\r\n"
 } | nc localhost 6379
