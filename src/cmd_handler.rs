@@ -465,9 +465,9 @@ impl CmdHandler {
                     Some(x) => {
                         let take_nbr = x.min(list.len());
                         let mut output = RespType::Array { length: take_nbr, value: None };
-                        for v in list.iter().take(take_nbr) {
+                        for v in list.drain(..take_nbr) {
                             output.add_item(
-                                RespType::BulkStr { length: v.len(), value: Some(v.to_string()) }); 
+                                RespType::BulkStr { length: v.len(), value: Some(v) }); 
                         };
                         output.serialize()
                     },
