@@ -329,6 +329,7 @@ impl CmdHandler {
         match self.lists.get(&key) {
             Some(list) => {
                 if start > stop {
+                    println!("Return empty array");
                     return RespType::Array{ length: 0, value: None}.serialize()
                 };
                 
@@ -350,14 +351,11 @@ impl CmdHandler {
                     for i in list.iter().skip(min_index).take(output_len){
                         output.add_item(RespType::BulkStr { length: i.len(), value: Some(i.clone()) }); 
                     };
-                    return output.serialize()
+                    output.serialize()
                 }
             },
             None => {
-                RespType::Array{
-                    length: 0,
-                    value: None
-                }.serialize()
+                RespType::Array{ length: 0, value: None }.serialize()
             }
         }
     }

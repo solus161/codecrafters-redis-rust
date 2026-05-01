@@ -496,14 +496,16 @@ impl RespType {
                             "{}{}{}", 
                             &prefix,
                             *length,
-                        DELIMITER,
+                            DELIMITER,
                         )
                     );
                     for item in v.iter() {
                         output.push_str(&item.serialize().unwrap());
-                    }
+                    };
+                    Some(output)
+                } else {
+                    Some(format!("{}{}{}", &prefix, 0, DELIMITER))
                 }
-                Some(output)
             },
             Self::BulkStr { length, value } => {
                 match value {
