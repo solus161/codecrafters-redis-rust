@@ -328,19 +328,35 @@ impl CmdHandler {
         // Check valid key First
         match self.lists.get(&key) {
             Some(list) => {
-                if start > stop {
-                    println!("Return empty array");
+                if start > stop && start >=0 && stop >= 0 {
                     return RespType::Array{ length: 0, value: None}.serialize()
                 };
                 
                 // VecDeque could wrap it self, so need this
-                if start as usize > list.len() - 1 {
+                if start >= 0 && start as usize > list.len() - 1 {
                     return RespType::Array{ length: 0, value: None}.serialize()
                 };
 
-                let max_index = (stop as usize).min(list.len() -1);
-                let min_index = (start as usize).min(list.len() - 1);
+                // Convert negative index to positive index
+                let start_abs: usize;
+                let stop_abs: usize;
+
+                if start < 0 {
+                    start_abs = list.len() + start as usize;
+                } else {
+                    start_abs = start as usize;
+                }
+
+                if stop < 0 {
+                    stop_abs = list.len() + stop as usize;
+                } else {
+                    stop_abs = stop as usize;
+                };
+
+                let max_index = stop_abs.min(list.len() -1);
+                let min_index = start_abs.min(list.len() - 1);
                 let output_len = max_index - min_index + 1;
+                println!("start {} stop {} start_abs {} stop_abs {} min {} max {}", start, stop, start_abs, stop_abs, min_index, max_index);
                 if output_len == 0 {
                     RespType::Array{ length: output_len, value: None}.serialize()
                 } else {

@@ -84,5 +84,10 @@
   
   # LRANGE list_key1 3 1 => empty array
   printf "*4\r\n\$6\r\nLRANGE\r\n\$9\r\nlist_key1\r\n\$1\r\n3\r\n\$1\r\n1\r\n"
-
+  
+  # LRANGE list_key1 -2 -1 => e f
+  printf "*4\r\n\$6\r\nLRANGE\r\n\$9\r\nlist_key1\r\n\$2\r\n-2\r\n\$2\r\n-1\r\n"
+  
+  # LRANGE list_key1 0 -3 => a b c d
+  printf "*4\r\n\$6\r\nLRANGE\r\n\$9\r\nlist_key1\r\n\$1\r\n0\r\n\$2\r\n-3\r\n"
 } | nc localhost 6379
