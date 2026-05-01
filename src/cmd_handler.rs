@@ -343,13 +343,13 @@ impl CmdHandler {
                 let stop_abs: usize;
 
                 if start < 0 {
-                    start_abs = (list.len() + start as usize).min(0);
+                    start_abs = (list.len() + start as usize).max(0);
                 } else {
                     start_abs = start as usize;
                 }
 
                 if stop < 0 {
-                    stop_abs = (list.len() + stop as usize).min(0);
+                    stop_abs = (list.len() + stop as usize).max(0);
                 } else {
                     stop_abs = stop as usize;
                 };
