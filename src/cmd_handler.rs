@@ -329,7 +329,7 @@ impl CmdHandler {
         match self.lists.get(&key) {
             Some(list) => {
                 // Edge case
-                if start > stop {
+                if start > stop && start > 0 && stop > 0 {
                     return RespType::Array{ length: 0, value: None}.serialize()
                 };
                 
