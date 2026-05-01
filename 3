@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque, hash_map::Entry };
+use std::collections::{HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::resp::{ RespType, RespValue };
@@ -135,7 +135,7 @@ impl Cmd {
             .parse().map_err(
                 |_| CmdError::InvalidArgument(
                     "start index for LRANGE".to_string()))?;
-        let stop: i64 = values.pop_front()
+        let end: i64 = values.pop_front()
             .ok_or(
                 CmdError::MissingArgument(
                     "No end index provided for LRANGE".to_string()))?
@@ -324,34 +324,7 @@ impl CmdHandler {
         // At this phrase, start and stop are non negative
         // - min index = 0
         // - max index = len - 1
-        
-        // Check valid key First
-        match self.lists.get(&key) {
-            Some(list) => {
-                println!("List {}: {:?}", &key, list);
-                let max_index = (stop as usize).min(list.len() -1);
-                let min_index = (start as usize).min(max_index).max(0);
-                let output_len = max_index - min_index;
-                if output_len == 0 {
-                    let output = RespType::Array{ length: output_len, value: None};
-                    output.serialize()
-                } else {
-                    let mut output = RespType::Array{
-                        length: output_len,
-                        value: Some(VecDeque::<RespType>::new())};
-                    
-                    for i in list.iter().skip(min_index).take(max_index - min_index + 1){
-                        output.add_item(RespType::BulkStr { length: i.len(), value: Some(i.clone()) }); 
-                    };
-                    return output.serialize()
-                }
-            },
-            None => {
-                RespType::Array{
-                    length: 0,
-                    value: None
-                }.serialize()
-            }
-        }
+        let max_index = (stop as usize).min(self.lists.len() -1);
+        let min_index = (start as usize).min(0);
     }
 }
