@@ -99,5 +99,10 @@
 
   # LRANGE list_key2 0 -1 => c b a
   printf "*4\r\n\$6\r\nLRANGE\r\n\$9\r\nlist_key2\r\n\$1\r\n0\r\n\$2\r\n-1\r\n"
-
+  
+  # LLEN list_key2 => 3
+  printf "*2\r\n\$4\r\nLLEN\r\n\$9\r\nlist_key2\r\n"
+  
+  # LLEN list_keyx => 0
+  printf "*2\r\n\$4\r\nLLEN\r\n\$9\r\nlist_keyx\r\n"
 } | nc localhost 6379

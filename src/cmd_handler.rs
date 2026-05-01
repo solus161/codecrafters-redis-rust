@@ -15,6 +15,7 @@ const KW_EX: &str = "EX";
 const KW_RPUSH: &str = "RPUSH";
 const KW_LRANGE: &str = "LRANGE";
 const KW_LPUSH: &str = "LPUSH";
+const KW_LLEN: &str = "LLEN";
 
 //-------Customed error for command construction
 #[derive(Debug)]
@@ -51,6 +52,7 @@ pub enum Cmd {
     RPUSH { key: String, value: Vec<String> },
     LRANGE{ key: String, start: i64, stop: i64},
     LPUSH { key: String, value: Vec<String> },
+    LLEN(String),
 }
 
 impl Cmd {
@@ -165,6 +167,13 @@ impl Cmd {
         Ok(Cmd::LPUSH { key, value: list_values })
     }
 
+    fn llen(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let key: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No key provided for LLEN".to_string()))?
+            .get_value().unwrap().str().unwrap();
+        Ok(Cmd::LLEN(key))
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -202,6 +211,9 @@ impl Cmd {
                                         },
                                         s if s == KW_LPUSH.to_string() => {
                                             return Self::lpush(v);
+                                        },
+                                        s if s == KW_LLEN.to_string() => {
+                                            return Self::llen(v);
                                         },
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))
@@ -273,6 +285,7 @@ impl CmdHandler {
                     Cmd::RPUSH{ key, value } => self.cmd_rpush(key, value),
                     Cmd::LRANGE { key, start, stop } => self.cmd_lrange(key, start, stop),
                     Cmd::LPUSH{ key, value } => self.cmd_lpush(key, value),
+                    Cmd::LLEN(s) => self.cmd_llen(s),
                 }
             },
             Err(e) => Self::cmd_err(e.to_string())
@@ -406,5 +419,16 @@ impl CmdHandler {
             list.push_front(v)
         };
         RespType::Integer(Some(list.len() as i64)).serialize()
+    }
+
+    fn cmd_llen(&self, key: String) -> Option<String> {
+        match self.lists.get(&key) {
+            Some(list) => {
+                RespType::Integer(Some(list.len() as i64)).serialize()
+            },
+            None => {
+                RespType::Integer(Some(0)).serialize()
+            }
+        }
     }
 }
