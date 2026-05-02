@@ -1,7 +1,8 @@
 use std::os::fd::{AsRawFd, RawFd};
 use std::io;
-
-use libc;
+use std::os::unix::io::RawFd as ioRawFd;
+use libc::{self, timerfd_create, timerfd_settime, itimerspec,
+    CLOCK_MONOTONIC, TFD_NONBLOCK};
 
 // Event fired one then fd disarmed, prevent race condition in multi-thread
 const READ_FLAGS: i32 = libc::EPOLLONESHOT | libc::EPOLLIN;
@@ -60,3 +61,21 @@ pub fn get_epoll_event_read(key: u64) -> libc::epoll_event {
     }
 }
 
+pub fn timer_create_fd() -> ioRawFd {
+    // Create a timer fd,
+    syscall!(
+        timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK)).unwrap()
+}
+
+pub fn timer_create_event(timer_fd: ioRawFd, duration_ms: i64) -> i32 {
+    let spec = itimerspec {
+        it_interval: libc::timespec { tv_sec: 0, tv_nsec: 0},
+        it_value: libc::timespec { 
+            tv_sec: (duration_ms/1000) as i64, 
+            tv_nsec: ((duration_ms%1000)*1_000_000) as i64}
+    };
+
+    unsafe {
+        timerfd_settime(timer_fd, 0, &spec, std::ptr::null_mut())
+    }
+} 

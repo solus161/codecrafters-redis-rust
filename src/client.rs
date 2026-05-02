@@ -11,6 +11,7 @@ use crate::resp::{ RespType, RespParser };
 
 #[derive(Debug)]
 pub struct TcpClient {
+    pub fd_key: u64,
     pub stream: TcpStream,
     pub resp_parser: RespParser,
     pub cmd_handler: Rc<RefCell<CmdHandler>>,
@@ -20,9 +21,11 @@ pub const BUFFER_SIZE: i32 = 4096;
 
 impl TcpClient {
     pub fn new(
+        fd_key: u64,
         stream: TcpStream, 
         cmd_handler: Rc<RefCell<CmdHandler>>) -> Self {
         Self {
+            fd_key: fd_key,
             stream: stream,
             resp_parser: RespParser::new(),
             cmd_handler: cmd_handler,
@@ -55,7 +58,7 @@ impl TcpClient {
                 Some(t) => {
                     let cmd = Cmd::from_resp(t);
                     println!("Cmd completed: {:?}", &cmd);
-                    if let Some(r) = self.cmd_handler.borrow_mut().handle(cmd) {
+                    if let Some(r) = self.cmd_handler.borrow_mut().handle(cmd, self.fd_key) {
                         self.stream.write_all(r.as_bytes())?
                     }
                 },

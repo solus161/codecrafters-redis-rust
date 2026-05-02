@@ -18,27 +18,37 @@ mod resp;
 mod tests;
 
 use crate::client::{TcpClient, BUFFER_SIZE};
+use crate::epoll::{get_epoll_event_read, timer_create_event, timer_create_fd};
 use crate::resp::RespParser;
 use crate::cmd_handler::CmdHandler;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Uncomment the code below to pass the first stage
+    // Fd for listener 
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
     listener.set_nonblocking(true).unwrap();
     let listener_fd = listener.as_raw_fd();
     let listener_fd_u64 = listener_fd as u64;
-    let cmd_handler = Rc::new(RefCell::new(CmdHandler::new()));
+    
+    // Fd for timer
+    let timer_fd = timer_create_fd();
 
+    let cmd_handler = Rc::new(RefCell::new(CmdHandler::new()));
+    
     // Get fd on epoll event
     let epoll_fd = epoll::epoll_create().expect("Error creating epoll queue");
     
+    // Add listener to epoll for changes
     epoll::add_interest(epoll_fd, listener_fd, epoll::get_epoll_event_read(listener_fd_u64))?;
     
+    // Add timer to epoll for changes
+    epoll::add_interest(epoll_fd, timer_fd, epoll::get_epoll_event_read(timer_fd as u64))?;
+
     let mut events: Vec<libc::epoll_event> = Vec::with_capacity(BUFFER_SIZE as usize);
     let mut clients: HashMap<u64, TcpClient> = HashMap::new();
 
     loop {
         events.clear();
+        println!("Waiting for event");
         let res = match syscall!(
             // epoll_wait need an epoll_fd and a raw pointer for events buffer
             // read up to BUFFER_SIZE events
@@ -47,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 epoll_fd,
                 events.as_mut_ptr() as *mut libc::epoll_event,
                 BUFFER_SIZE,
-                1000 as libc::c_int,
+                -1 as libc::c_int,
             )
         ) {
             Ok(v) => v,
@@ -75,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             clients.insert(
                                 stream_key.try_into().unwrap(),
                                 TcpClient::new(
+                                    stream_key.try_into().unwrap(),
                                     stream, 
                                     Rc::clone(&cmd_handler)));
                             // println!("Registered epoll with key {}", stream_key);
@@ -88,6 +99,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     epoll::modify_interest(
                         epoll_fd, listener_fd.try_into().unwrap(), 
                         epoll::get_epoll_event_read(listener_fd as u64))?;
+                },
+                
+                // Timer triggered
+                _key if _key == timer_fd as u64 => {
+                    // Clear timer, reading the fd clears the readable state
+                    let mut buf = [0u8; 8];
+                    unsafe { libc::read(timer_fd, buf.as_mut_ptr() as *mut _, 8) };
+
+                    // If deadline is not served, client_id should receive a NullBulkStr
+                    cmd_handler.borrow_mut().process_deadline_served();
                 },
                 
                 // St else, may be current client
@@ -127,9 +148,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             clients.remove(&key);
                         };
                     };
-                }
+                },
+
+                
             }
-        }
+        };
+        
+        // All events processed, now processing waiting queue for BLPOP
+                
+        // After a batch/cycle, match available blpop and item
+        // For example: B -> BLPOP 0 at t0
+        // A -> RPUSH key "a" at t1
+        // end cycle, A and B must be matched, 
+        // not waiting till next cycle
+        cmd_handler.borrow_mut().serve_blpop_queue(); 
+
+        // Setup timer for next deadline
+        match cmd_handler.borrow_mut().get_next_timeout() {
+            Some(x) => {
+                timer_create_event(timer_fd, x as i64);
+                Some(x)
+            },
+            None => None
+        };
+        
+        // BLPOP responses gathered, now flush
+        for res in cmd_handler.borrow_mut().response_queue.drain(..) { 
+            let (client_id, message) = res;
+            let _ = clients.get_mut(&client_id).unwrap()
+                .stream.write_all(message.as_bytes());
+        };
     }
 }
 

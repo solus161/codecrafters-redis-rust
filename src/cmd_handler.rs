@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque, hash_map::Entry };
+use std::string::ParseError;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::resp::{ RespType, RespValue };
@@ -17,6 +18,7 @@ const KW_LRANGE: &str = "LRANGE";
 const KW_LPUSH: &str = "LPUSH";
 const KW_LLEN: &str = "LLEN";
 const KW_LPOP: &str = "LPOP";
+const KW_BLPOP: &str = "BLPOP";
 
 //-------Customed error for command construction
 #[derive(Debug)]
@@ -55,6 +57,7 @@ pub enum Cmd {
     LPUSH { key: String, value: Vec<String> },
     LLEN(String),
     LPOP{ key: String, length: Option<usize> },
+    BLPOP{ key: String, timeout_ms: Option<i64> },
 }
 
 impl Cmd {
@@ -196,6 +199,26 @@ impl Cmd {
         Ok(Cmd::LPOP{ key, length })
     }
 
+    fn blpop(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let key: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No key provided for BLPOP".to_string()))?
+            .get_value().unwrap().str().unwrap();
+        
+        let timeout_ms: i64 = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No timeout provided for BLPOP".to_string()))?
+            .get_value().unwrap().str().unwrap()
+            .parse::<f64>()
+            .map_err(
+                |_| CmdError::ParseError("timeout for BLPOP".to_string())
+            )? as i64;
+        
+        if timeout_ms == 0 {
+            Ok(Self::BLPOP { key, timeout_ms: None })
+        } else {
+            Ok(Self::BLPOP { key, timeout_ms: Some(timeout_ms) })
+        }
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -240,6 +263,9 @@ impl Cmd {
                                         s if s == KW_LPOP.to_string() => {
                                             return Self::lpop(v);
                                         },
+                                        s if s == KW_BLPOP.to_string() => {
+                                            return Self::blpop(v)
+                                        }
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))
                                     } 
@@ -287,19 +313,36 @@ struct HashItem { value: String, expired_at: Option<u64> }
 //---------Command handler, convert Cmd struct into action
 #[derive(Debug)]
 pub struct CmdHandler {
+    pub response_queue: Vec<(u64, String)>,             // client_id, message
     hashes: HashMap<String, HashItem>,
     lists: HashMap<String, VecDeque<String>>,
+    lists_queue: HashMap<String, VecDeque<(u64, u64)>>, // BLPOP queue for each list: 
+                                                        // - list name
+                                                        // - tuple of client id and associated deadline 
+                                                        // no deadline = 0
+    deadline_client: HashMap<u64, u64>,                 // map deadline - client
+                                                        // deadline set or served is pop off this
+    deadline_set: Option<(u64, u64)>,                   // once set a deadline pop off deadline_client and
+                                                        // inserted here
+    deadline_done: HashMap<u64, u64>,                   // fullfilled deadline 
 }
+
+// Thx to the loop nature, each BLPOP request has distinct timestamp
 
 impl CmdHandler {
     pub fn new() -> Self{
         Self { 
+            response_queue: Vec::new(),
             hashes: HashMap::new(),
             lists: HashMap::new(),
+            lists_queue: HashMap::new(),
+            deadline_client: HashMap::new(),
+            deadline_set: None,
+            deadline_done: HashMap::new(),
         }
     }
 
-    pub fn handle(&mut self, cmd: Result<Cmd, CmdError>) -> Option<String> {
+    pub fn handle(&mut self, cmd: Result<Cmd, CmdError>, client_id: u64) -> Option<String> {
         match cmd {
             Ok(c) => {
                 match c {
@@ -312,6 +355,7 @@ impl CmdHandler {
                     Cmd::LPUSH{ key, value } => self.cmd_lpush(key, value),
                     Cmd::LLEN(s) => self.cmd_llen(s),
                     Cmd::LPOP{ key, length } => self.cmd_lpop(key, length),
+                    Cmd::BLPOP { key, timeout_ms } => self.cmd_blpop(key, timeout_ms, client_id),
                 }
             },
             Err(e) => Self::cmd_err(e.to_string())
@@ -378,7 +422,8 @@ impl CmdHandler {
     }
 
     fn cmd_rpush(&mut self, key: String, value: Vec<String>) -> Option<String> {
-        let list = self.lists.entry(key).or_insert_with(VecDeque::new);
+        let list = self.lists.entry(key.clone()).or_insert_with(VecDeque::new);
+        self.lists_queue.entry(key).or_insert_with(VecDeque::new);
         list.extend(value);
         RespType::Integer(Some(list.len() as i64)).serialize()
     }
@@ -440,7 +485,8 @@ impl CmdHandler {
     }
     
     fn cmd_lpush(&mut self, key: String, value: Vec<String>) -> Option<String> {
-        let list = self.lists.entry(key).or_insert_with(VecDeque::new);
+        let list = self.lists.entry(key.clone()).or_insert_with(VecDeque::new);
+        self.lists_queue.entry(key).or_insert_with(VecDeque::new);
         for v in value {
             list.push_front(v)
         };
@@ -490,5 +536,129 @@ impl CmdHandler {
                 RespType::BulkStr { length: 0, value: None }.serialize()
             }
         }         
+    }
+
+    fn cmd_blpop(
+        &mut self, 
+        key: String, 
+        timeout_ms: Option<i64>, 
+        client_id: u64) -> Option<String> {
+        // timeout is converted to deadline
+        
+        let deadline: u64 = match timeout_ms{
+            Some(x) => {
+                Self::now() + x as u64
+            },
+            None => {
+                0
+            } 
+        };
+
+        match self.lists.get_mut(&key) {
+            Some(list) => {
+                // If key-list exists, key-list queue must exists
+                // as being created by rpush and lpush
+                let list_queue = self.lists_queue.get_mut(&key).unwrap();
+                if list_queue.is_empty() && !list.is_empty() {
+                    // No other client in waiting list and item available, pop
+                    let item = list.pop_front().unwrap();
+                    let mut output = RespType::Array{ length: 2, value: None};
+                    let list_name = RespType::BulkStr { length: key.len(), value: Some(key) };
+                    let value = RespType::BulkStr { length: item.len(), value: Some(item) };
+                    output.add_item(list_name);
+                    output.add_item(value);
+                    output.serialize()
+                } else {
+                    // Wait
+                    self.deadline_client.insert(deadline, client_id);
+                    self.lists_queue.get_mut(&key).unwrap().push_back((client_id, deadline));
+                    None
+                } 
+            },
+            None => {
+                // No list exists, wait in queue for client
+                self.lists_queue.entry(key.clone())
+                    .or_insert_with(VecDeque::new).push_back((client_id, deadline));
+                None
+            }
+        }
+    }
+
+    pub fn serve_blpop_queue(&mut self) {
+        // Execute once at the end of each event loop 1,
+        // matching BLPOP queue with available item,
+        // other LPOP requests are served at client level 2
+        for (k, queue) in self.lists_queue.iter_mut() {
+            while let Some(list) = self.lists.get_mut(k) {
+                if list.is_empty() || queue.is_empty() {
+                    break
+                };
+                
+                let (client_id, deadline) = queue.pop_front().unwrap();
+                let item = list.pop_front().unwrap();
+                
+                // Construct response RESP
+                let mut resp_response = RespType::Array { length: 2, value: None};
+                let list_name = RespType::BulkStr { length: k.len(), value: Some(k.clone())};
+                let value = RespType::BulkStr { length: item.len(), value: Some(item)};
+                resp_response.add_item(list_name);
+                resp_response.add_item(value);
+                
+                // Push response to output
+                self.response_queue.push((client_id, resp_response.serialize().unwrap()));
+
+                // push deadline to deadline_done
+                // later when a timer fired, it will get the current dealine in deadline_set
+                // and check whether this deadline has been served (check this hashmap)
+                // prevent triggering timer when queue has been served
+                self.deadline_done.insert(deadline, client_id);
+            }    
+        };
+    }
+
+    pub fn get_next_timeout(&mut self) -> Option<u64> {
+        // Get the minimum deadline in deadline_client
+        // converted to timeout
+        let next_deadline = self.deadline_client.keys().min()?.clone();
+        let client_id = self.deadline_client.get(&next_deadline).unwrap().clone();
+        
+        // Remove deadline as it will be set
+        self.deadline_client.remove(&next_deadline);
+
+        let now = Self::now();
+        if next_deadline > Self::now() {
+            self.deadline_set = Some((next_deadline, client_id));
+            Some(next_deadline - now)
+        } else {
+            // Already expired, could be that timeout is set too short
+            // push a message to response queue
+            let msg = RespType::BulkStr { length: 0, value: None }.serialize()?;
+            self.response_queue.push((client_id, msg));
+            None
+        }
+    }
+
+    pub fn process_deadline_served(&mut self) {
+        // Get current deadline, the one just been fired
+        match self.deadline_set {
+            Some(x) => {
+                let (deadline, client_id) = x;
+                // Check whether this deadline has been served
+                let done = self.deadline_done.get(&deadline).cloned();
+                match done {
+                    Some(_) => {
+                        // Pop this out of deadline_done
+                        self.deadline_done.remove(&deadline);
+                    },
+                    None => {
+                        // Not served, response NullBulkStr
+                        let msg = RespType::BulkStr { length: 0, value: None }
+                            .serialize().unwrap();
+                        self.response_queue.push((client_id, msg));
+                    }
+                }
+            },
+            None => {}
+        }
     }
 }
