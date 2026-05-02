@@ -48,7 +48,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         events.clear();
-        println!("Waiting for event");
         let res = match syscall!(
             // epoll_wait need an epoll_fd and a raw pointer for events buffer
             // read up to BUFFER_SIZE events
@@ -74,7 +73,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match listener.accept() {
                         Ok((stream, _)) => {
                             stream.set_nonblocking(true)?;
-                            // println!("New client: {}", addr);
 
                             // Add the stream fd to epoll watch queue
                             let stream_key = stream.as_raw_fd();
@@ -88,13 +86,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     stream_key.try_into().unwrap(),
                                     stream, 
                                     Rc::clone(&cmd_handler)));
-                            // println!("Registered epoll with key {}", stream_key);
                         },
                         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {eprintln!("{}", e)},
                         Err(e) => eprintln!("Couldn't accept: {}", e),
                     };
-                    
-                    // println!("Try to modify interest");
                     // Register epoll queue with its own key again
                     epoll::modify_interest(
                         epoll_fd, listener_fd.try_into().unwrap(), 
@@ -113,8 +108,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 
                 // St else, may be current client
                 key => {
-                    //println!("key in events {}", key);
-                    // println!{"Package with key {}", key};
                     if let Some(client) = clients.get_mut(&key) {
                         let mut disconnected = false;
                         // Bit mask of event type of an epoll event
@@ -128,7 +121,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         epoll::modify_interest(
                                             epoll_fd, key as i32, 
                                             epoll::get_epoll_event_read(key))?;
-                                        // println!("Registered epoll with key {} again", key);
                                     },
                                     Err(boxed_e) => {
                                         println!("Error with client fd {}: {:?}", key, boxed_e);
@@ -178,6 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = clients.get_mut(&client_id).unwrap()
                 .stream.write_all(message.as_bytes());
         };
+        println!("list queue: {:?}", cmd_handler.borrow().lists_queue);
     }
 }
 

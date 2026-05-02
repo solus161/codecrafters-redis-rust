@@ -504,7 +504,8 @@ impl RespType {
                     };
                     Some(output)
                 } else {
-                    Some(format!("{}{}{}", &prefix, 0, DELIMITER))
+                    // value = None for Null array
+                    Some(format!("{}{}{}", &prefix, -1, DELIMITER))
                 }
             },
             Self::BulkStr { length, value } => {

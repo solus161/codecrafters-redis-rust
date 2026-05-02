@@ -210,7 +210,7 @@ impl Cmd {
             .parse::<f64>()
             .map_err(
                 |_| CmdError::ParseError("timeout for BLPOP".to_string())
-            )? as i64;
+            ).map(|x| (x * 1000.0) as i64)?;
         
         if timeout_ms == 0 {
             Ok(Self::BLPOP { key, timeout_ms: None })
@@ -316,13 +316,13 @@ pub struct CmdHandler {
     pub response_queue: Vec<(u64, String)>,             // client_id, message
     hashes: HashMap<String, HashItem>,
     lists: HashMap<String, VecDeque<String>>,
-    lists_queue: HashMap<String, VecDeque<(u64, u64)>>, // BLPOP queue for each list: 
+    pub lists_queue: HashMap<String, VecDeque<(u64, u64)>>, // BLPOP queue for each list: 
                                                         // - list name
                                                         // - tuple of client id and associated deadline 
                                                         // no deadline = 0
-    deadline_client: HashMap<u64, u64>,                 // map deadline - client
+    deadline_client: HashMap<u64, (u64, String)>,       // map deadline - client
                                                         // deadline set or served is pop off this
-    deadline_set: Option<(u64, u64)>,                   // once set a deadline pop off deadline_client and
+    deadline_set: Option<(u64, u64, String)>,           // once set a deadline pop off deadline_client and
                                                         // inserted here
     deadline_done: HashMap<u64, u64>,                   // fullfilled deadline 
 }
@@ -438,12 +438,12 @@ impl CmdHandler {
             Some(list) => {
                 // Edge case
                 if start > stop && start > 0 && stop > 0 {
-                    return RespType::Array{ length: 0, value: None}.serialize()
+                    return RespType::Array{ length: 0, value: Some(VecDeque::new())}.serialize()
                 };
                 
                 // VecDeque could wrap it self, so need this
                 if start >= 0 && start as usize > list.len() - 1 {
-                    return RespType::Array{ length: 0, value: None}.serialize()
+                    return RespType::Array{ length: 0, value: Some(VecDeque::new())}.serialize()
                 };
 
                 // Convert negative index to positive index
@@ -466,7 +466,10 @@ impl CmdHandler {
                 let min_index = start_abs.min(list.len() as i64 - 1) as usize;
                 let output_len = max_index - min_index + 1;
                 if output_len == 0 {
-                    RespType::Array{ length: output_len, value: None}.serialize()
+                    RespType::Array{
+                        length: output_len, 
+                        value: Some(VecDeque::new())
+                    }.serialize()
                 } else {
                     let mut output = RespType::Array{
                         length: output_len as usize,
@@ -479,7 +482,7 @@ impl CmdHandler {
                 }
             },
             None => {
-                RespType::Array{ length: 0, value: None }.serialize()
+                RespType::Array{ length: 0, value: Some(VecDeque::new()) }.serialize()
             }
         }
     }
@@ -545,13 +548,9 @@ impl CmdHandler {
         client_id: u64) -> Option<String> {
         // timeout is converted to deadline
         
-        let deadline: u64 = match timeout_ms{
-            Some(x) => {
-                Self::now() + x as u64
-            },
-            None => {
-                0
-            } 
+        let deadline = match timeout_ms{
+            Some(x) => { Some(Self::now() + x as u64) },
+            None => None
         };
 
         match self.lists.get_mut(&key) {
@@ -570,16 +569,35 @@ impl CmdHandler {
                     output.serialize()
                 } else {
                     // Wait
-                    self.deadline_client.insert(deadline, client_id);
-                    self.lists_queue.get_mut(&key).unwrap().push_back((client_id, deadline));
-                    None
+                    match deadline {
+                        Some(x) => {
+                            self.deadline_client.insert(x, (client_id, key.clone()));
+                            self.lists_queue.get_mut(&key).unwrap().push_back((client_id, x));
+                            None
+                        },
+                        None => {
+                            self.lists_queue.entry(key.clone())
+                                .or_insert_with(VecDeque::new).push_back((client_id, 0));
+                            None
+                        }
+                    }
                 } 
             },
             None => {
                 // No list exists, wait in queue for client
-                self.lists_queue.entry(key.clone())
-                    .or_insert_with(VecDeque::new).push_back((client_id, deadline));
-                None
+                match deadline {
+                    Some(x) => {
+                        self.deadline_client.insert(x, (client_id, key.clone()));
+                        self.lists_queue.entry(key.clone())
+                            .or_insert_with(VecDeque::new).push_back((client_id, x));
+                        None
+                    },
+                    None => {
+                        self.lists_queue.entry(key.clone())
+                            .or_insert_with(VecDeque::new).push_back((client_id, 0));
+                        None
+                    }
+                }
             }
         }
     }
@@ -611,7 +629,9 @@ impl CmdHandler {
                 // later when a timer fired, it will get the current dealine in deadline_set
                 // and check whether this deadline has been served (check this hashmap)
                 // prevent triggering timer when queue has been served
-                self.deadline_done.insert(deadline, client_id);
+                if deadline > 0 {
+                    self.deadline_done.insert(deadline, client_id);
+                }
             }    
         };
     }
@@ -620,19 +640,18 @@ impl CmdHandler {
         // Get the minimum deadline in deadline_client
         // converted to timeout
         let next_deadline = self.deadline_client.keys().min()?.clone();
-        let client_id = self.deadline_client.get(&next_deadline).unwrap().clone();
+        let (client_id, list_name) = self.deadline_client.get(&next_deadline).unwrap().clone();
         
         // Remove deadline as it will be set
         self.deadline_client.remove(&next_deadline);
 
         let now = Self::now();
         if next_deadline > Self::now() {
-            self.deadline_set = Some((next_deadline, client_id));
+            self.deadline_set = Some((next_deadline, client_id, list_name));
             Some(next_deadline - now)
         } else {
             // Already expired, could be that timeout is set too short
-            // push a message to response queue
-            let msg = RespType::BulkStr { length: 0, value: None }.serialize()?;
+            let msg = RespType::Array{ length: 0, value: None}.serialize().unwrap();
             self.response_queue.push((client_id, msg));
             None
         }
@@ -640,9 +659,12 @@ impl CmdHandler {
 
     pub fn process_deadline_served(&mut self) {
         // Get current deadline, the one just been fired
-        match self.deadline_set {
+        // Must also remove expired item in lists_queue
+        let deadline_set = std::mem::replace(&mut self.deadline_set, None);
+        match deadline_set {
             Some(x) => {
-                let (deadline, client_id) = x;
+                let (deadline, client_id, list_name) = x;
+                
                 // Check whether this deadline has been served
                 let done = self.deadline_done.get(&deadline).cloned();
                 match done {
@@ -651,9 +673,12 @@ impl CmdHandler {
                         self.deadline_done.remove(&deadline);
                     },
                     None => {
-                        // Not served, response NullBulkStr
-                        let msg = RespType::BulkStr { length: 0, value: None }
-                            .serialize().unwrap();
+                        // Not served, pop deadline from relevant lists_queue,
+                        if let Some(list) = self.lists_queue.get_mut(&list_name) {
+                            list.retain(|(_, d)| *d != deadline);  
+                        };
+                        // return null array
+                        let msg = RespType::Array{ length: 0, value: None}.serialize().unwrap();
                         self.response_queue.push((client_id, msg));
                     }
                 }
