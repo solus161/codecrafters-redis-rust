@@ -9,7 +9,6 @@ use std::str::from_utf8;
 use crate::cmd_handler::{Cmd, CmdHandler};
 use crate::resp::{ RespType, RespParser };
 
-#[derive(Debug)]
 pub struct TcpClient {
     pub fd_key: u64,
     pub stream: TcpStream,

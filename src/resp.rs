@@ -222,8 +222,6 @@ impl RespParser {
         None
     }
 
-    
-
     fn next_till_new_line(&mut self) -> Option<String> {
         // Consume buf till getting new line \r\n
         // println!("Head 5 buff: {:?}", self.buf.iter().take(5).collect::<Vec<_>>());

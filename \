@@ -408,7 +408,6 @@ impl CmdHandler {
                     Cmd::LLEN(s) => self.cmd_llen(s),
                     Cmd::LPOP{ key, length } => self.cmd_lpop(key, length),
                     Cmd::BLPOP { key, timeout_ms } => self.cmd_blpop(key, timeout_ms, client_id),
-                    Cmd::TYPE(key) => self.cmd_type(key),
                 }
             },
             Err(e) => Self::cmd_err(e.to_string())
@@ -432,6 +431,12 @@ impl CmdHandler {
             },
             None => None
         }
+    }
+
+    fn register_request(&mut self, client_id: u64, deadline: u64, key: String) {
+        // Register a request
+        let timestamp = Self::now();
+        self.request_table.insert(timestamp, (client_id, deadline, key));
     }
 
     fn add_to_backlog(
@@ -832,20 +837,11 @@ impl CmdHandler {
         }
     }
 
-    fn cmd_type(&self, key: String) -> Option<String> {
-        let ktype = match self.data.get(&key) {
-            Some(item) => {
-                item.value.get_type().to_string()
-            },
-            None => "none".to_string()
-        };
-        RespType::SimpleStr(Some(ktype)).serialize()
-    }
-
     pub fn serve_queue(&mut self) {
         // Execute once at the end of main each event loop,
         // matching BLPOP queue with available item,
         // other LPOP requests are served at request time at client loop
+        println!("Running serve queue");
         let mut tasks = VecDeque::new();
         let mut timestamps: Vec<u64> = Vec::new();
         let mut deadlines: Vec<u64> = Vec::new();
@@ -857,6 +853,8 @@ impl CmdHandler {
                         let max_pop = v.len().min(list.len());
                         for _ in 0..max_pop {
                             let (timestamp, _, deadline, task) = v.pop_front().unwrap();
+                            println!("Extract task for deadline {}", deadline);
+                                                        
                             tasks.push_back(task);
                             timestamps.push(timestamp);
                             deadlines.push(deadline);
@@ -875,5 +873,6 @@ impl CmdHandler {
         for d in deadlines {
             self.remove_deadline(d);
         };
+        println!("End serve queue");
     }
 }

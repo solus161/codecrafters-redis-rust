@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fd for timer
     let timer_fd = timer_create_fd();
 
-    let cmd_handler = Rc::new(RefCell::new(CmdHandler::new()));
+    let cmd_handler = Rc::new(RefCell::new(CmdHandler::new(timer_fd)));
     
     // Get fd on epoll event
     let epoll_fd = epoll::epoll_create().expect("Error creating epoll queue");
@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     unsafe { libc::read(timer_fd, buf.as_mut_ptr() as *mut _, 8) };
 
                     // If deadline is not served, client_id should receive a NullBulkStr
-                    cmd_handler.borrow_mut().process_deadline_served();
+                    cmd_handler.borrow_mut().callback_deadline_expire();
                 },
                 
                 // St else, may be current client
@@ -153,24 +153,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // A -> RPUSH key "a" at t1
         // end cycle, A and B must be matched, 
         // not waiting till next cycle
-        cmd_handler.borrow_mut().serve_blpop_queue(); 
+        cmd_handler.borrow_mut().serve_queue(); 
 
-        // Setup timer for next deadline
-        match cmd_handler.borrow_mut().get_next_timeout() {
-            Some(x) => {
-                timer_create_event(timer_fd, x as i64);
-                Some(x)
-            },
-            None => None
-        };
-        
         // BLPOP responses gathered, now flush
         for res in cmd_handler.borrow_mut().response_queue.drain(..) { 
             let (client_id, message) = res;
             let _ = clients.get_mut(&client_id).unwrap()
                 .stream.write_all(message.as_bytes());
         };
-        println!("list queue: {:?}", cmd_handler.borrow().lists_queue);
     }
 }
 
