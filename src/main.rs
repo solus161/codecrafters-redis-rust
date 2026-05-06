@@ -12,6 +12,7 @@ use libc;
 #[macro_use]
 mod utils;
 mod epoll;
+mod cmd_builder;
 mod cmd_handler;
 mod client;
 mod resp;

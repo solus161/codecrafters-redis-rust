@@ -6,7 +6,8 @@ use std::net::TcpStream;
 use std::rc::Rc;
 use std::str::from_utf8;
 
-use crate::cmd_handler::{Cmd, CmdHandler};
+use crate::cmd_handler::CmdHandler;
+use crate::cmd_builder::Cmd;
 use crate::resp::{ RespType, RespParser };
 
 pub struct TcpClient {

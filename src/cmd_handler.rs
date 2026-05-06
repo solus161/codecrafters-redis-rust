@@ -1,333 +1,17 @@
 use std::collections::{BTreeMap, HashSet};
 use std::collections::{HashMap, VecDeque, hash_map::Entry };
 use std::string::ParseError;
-use std::time::{SystemTime, UNIX_EPOCH};
+
 use std::u64;
 
 use libc::write;
 
 use crate::resp::{ RespType, RespValue };
 use crate::epoll::timer_create_event;
+use crate::cmd_builder::{ Cmd, CmdError, CmdOption, KW_PONG };
+use crate::utils::now;
 
-
-// Command Keyword
-const KW_PING: &str = "PING";
-const KW_PONG: &str = "PONG";
-const KW_ECHO: &str = "ECHO";
-const KW_SET: &str = "SET";
-const KW_GET: &str = "GET";
-const KW_PX: &str = "PX";
-const KW_EX: &str = "EX";
-const KW_RPUSH: &str = "RPUSH";
-const KW_LRANGE: &str = "LRANGE";
-const KW_LPUSH: &str = "LPUSH";
-const KW_LLEN: &str = "LLEN";
-const KW_LPOP: &str = "LPOP";
-const KW_BLPOP: &str = "BLPOP";
-const KW_TYPE: &str = "TYPE";
-
-//-------Customed error for command construction and handling
-#[derive(Debug)]
-pub enum CmdError {
-    InvalidArgument(String),
-    MissingArgument(String),
-    ParseError(String),
-    NoCmdError,
-    ParseIntError(String),
-    UnsupportedCmdStructure,
-    UnsupportedCommand(String),
-}
-
-impl std::fmt::Display for CmdError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Self::InvalidArgument(msg) => write!(f, "{}", msg),
-            Self::MissingArgument(msg) => write!(f, "{}", msg),
-            Self::ParseError(msg) => write!(f, "Error parsing {}", msg),
-            Self::NoCmdError => write!(f, "No command found"),
-            Self::ParseIntError(msg) => write!(f, "Error parsing int value {}", msg),
-            Self::UnsupportedCmdStructure => write!(f, "Unsupported command structure"),
-            Self::UnsupportedCommand(msg) => write!(f, "Key {} does not support this command", msg),
-        }
-    }
-}
-
-
-//-------Command, struct and parser
-#[derive(Debug)]
-pub enum Cmd {
-    PING, 
-    ECHO(String),
-    SET { key: String, value: String, opt: Option<CmdOption>  },
-    GET { key: String },
-    RPUSH { key: String, value: Vec<String> },
-    LRANGE{ key: String, start: i64, stop: i64},
-    LPUSH { key: String, value: VecDeque<String> },
-    LLEN(String),
-    LPOP{ key: String, length: Option<usize> },
-    BLPOP{ key: String, timeout_ms: Option<i64> },
-    TYPE(String),
-}
-
-impl Cmd {
-    fn ping() -> Result<Self, CmdError> { Ok(Self::PING) }
-    fn echo(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
-        let s: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument(
-                    "No argument provided for ECHO".to_string()))?
-            .get_value()
-            .ok_or(CmdError::ParseError("ECHO".to_string()))?
-            .str()
-            .ok_or(CmdError::ParseError("ECHO".to_string()))?;
-        return Ok(Self::ECHO(s));
-    }
-    
-    fn set(mut values: VecDeque<RespType> ) -> Result<Self, CmdError> {
-        let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for SET".to_string()))?
-            .get_value().unwrap()
-            .str().unwrap();
-
-        let value: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No value provided for SET".to_string()))?
-            .get_value().unwrap()
-            .str().unwrap();
-
-        match values.pop_front() {
-            // Having option
-            Some(o) => {
-                let expire_key: String = o.get_value().unwrap().str().unwrap();        
-                let expire_value: u64 = match values.pop_front() {
-                    Some(o) => {
-                        // TODO: handle conversion error
-                        o.get_value().unwrap().str().unwrap()
-                            .parse::<u64>()
-                            .map_err(|_| CmdError::ParseError("expiration value".to_string()))?
-                    },
-                    None => return Err(CmdError::MissingArgument("No expiration provided".to_string()))
-                };
-                let opt = CmdOption::set(expire_key, expire_value)
-                    .ok_or(CmdError::ParseIntError("SET".to_string()))?;
-                Ok(Self::SET{ key: key, value: value, opt: Some(opt) })
-            },
-            // Have no option
-            None => Ok(Self::SET{ key: key, value: value, opt: None })
-        }
-    }
-
-    fn get(mut values: VecDeque<RespType>) -> Result<Self, CmdError>{
-        let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for GET".to_string()))?
-            .get_value().unwrap().str().unwrap();
-        Ok(Cmd::GET{ key })
-    }
-
-    fn rpush(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
-        let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for RPUSH".to_string()))?
-            .get_value().unwrap().str().unwrap();
-        
-        let mut list_values: Vec<String> = Vec::new();
-        while !values.is_empty() {
-            // Pop from values, extract String, push to list_values
-            let v = values.pop_front()
-                .ok_or(CmdError::MissingArgument("No value provided for RPUSH".to_string()))?
-                .get_value().unwrap()
-                .str().unwrap();
-            list_values.push(v);
-        };
-        Ok(Cmd::RPUSH { key, value: list_values })
-    }
-    
-    fn lrange(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
-        let key: String = values.pop_front()
-            .ok_or(
-                CmdError::MissingArgument(
-                    "No key provided for LRANGE".to_string()))?
-            .get_value().unwrap().str().unwrap();
-        let start: i64 = values.pop_front()
-            .ok_or(
-                CmdError::MissingArgument(
-                    "No start index provided for LRANGE".to_string()))?
-            .get_value().unwrap().str().unwrap()
-            .parse().map_err(
-                |_| CmdError::InvalidArgument(
-                    "start index for LRANGE".to_string()))?;
-        let stop: i64 = values.pop_front()
-            .ok_or(
-                CmdError::MissingArgument(
-                    "No end index provided for LRANGE".to_string()))?
-            .get_value().unwrap().str().unwrap()
-            .parse().map_err(
-                |_| CmdError::InvalidArgument(
-                    "end index for LRANGE".to_string()))?;
-        Ok(Self::LRANGE { key, start, stop })
-    }
-    
-    fn lpush(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
-        let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for LPUSH".to_string()))?
-            .get_value().unwrap().str().unwrap();
-        
-        let mut list_values: VecDeque<String> = VecDeque::new();
-        while !values.is_empty() {
-            // Pop from values, extract String, push to list_values
-            let v = values.pop_front()
-                .ok_or(CmdError::MissingArgument("No value provided for LPUSH".to_string()))?
-                .get_value().unwrap()
-                .str().unwrap();
-            list_values.push_back(v);
-        };
-        Ok(Cmd::LPUSH { key, value: list_values })
-    }
-
-    fn llen(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
-        let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for LLEN".to_string()))?
-            .get_value().unwrap().str().unwrap();
-        Ok(Cmd::LLEN(key))
-    }
-
-    fn lpop(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
-        let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for LPOP".to_string()))?
-            .get_value().unwrap().str().unwrap();
-        
-        let length: Option<usize> = match values.pop_front() {
-            Some(s) => {
-                match s.get_value().unwrap().str().unwrap()
-                    .parse::<usize>() {
-                    Ok(x) => Some(x),
-                    Err(_) => return
-                        Err(CmdError::InvalidArgument("length for LPOP".to_string()))
-                    }
-            },
-            None => None
-        };
-
-        Ok(Cmd::LPOP{ key, length })
-    }
-
-    fn blpop(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
-        let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for BLPOP".to_string()))?
-            .get_value().unwrap().str().unwrap();
-        
-        let timeout_ms: i64 = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No timeout provided for BLPOP".to_string()))?
-            .get_value().unwrap().str().unwrap()
-            .parse::<f64>()
-            .map_err(
-                |_| CmdError::ParseError("timeout for BLPOP".to_string())
-            ).map(|x| (x * 1000.0) as i64)?;
-        
-        if timeout_ms < 0 {
-            Err(CmdError::InvalidArgument("expiration".to_string()))
-        } else if timeout_ms == 0 {
-            Ok(Self::BLPOP { key, timeout_ms: None })
-        } else {
-            Ok(Self::BLPOP { key, timeout_ms: Some(timeout_ms) })
-        }
-    }
-    
-    fn ktype(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
-        let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for TYPE".to_string()))?
-            .get_value().unwrap().str().unwrap();
-        Ok(Self::TYPE(key))
-    }
-
-    pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
-        // Instantiate Cmd from RespType
-        match resp_type {
-            RespType::Array{ length, value } => {
-                // Iterate through the array to construct Cmd
-                // A command is always in array form
-                if length == 0 { return Err(CmdError::NoCmdError) };
-
-                // First item must be cmd type
-                if  let Some(mut v) = value {
-                    match v.pop_front() {
-                        Some(o) => {
-                            match o {
-                                RespType::BulkStr { length, value } => {
-                                    if length == 0 { return Err(CmdError::NoCmdError) };
-
-                                    match value.unwrap().to_uppercase() {
-                                        s if s == KW_PING.to_string() => {
-                                            return Self::ping();
-                                        },
-                                        s if s == KW_ECHO.to_string() => {
-                                            return Self::echo(v);
-                                        },
-                                        s if s == KW_SET.to_string() => {
-                                            return Self::set(v);
-                                        },
-                                        s if s == KW_GET.to_string() => {
-                                            return Self::get(v);
-                                        },
-                                        s if s == KW_RPUSH.to_string() => {
-                                            return Self::rpush(v);
-                                        },
-                                        s if s == KW_LRANGE.to_string() => {
-                                            return Self::lrange(v);
-                                        },
-                                        s if s == KW_LPUSH.to_string() => {
-                                            return Self::lpush(v);
-                                        },
-                                        s if s == KW_LLEN.to_string() => {
-                                            return Self::llen(v);
-                                        },
-                                        s if s == KW_LPOP.to_string() => {
-                                            return Self::lpop(v);
-                                        },
-                                        s if s == KW_BLPOP.to_string() => {
-                                            return Self::blpop(v)
-                                        },
-                                        s if s == KW_TYPE.to_string() => {
-                                            return Self::ktype(v)
-                                        },
-                                        _ => return Err(
-                                            CmdError::InvalidArgument("Invalid command".to_string()))
-                                    } 
-                                },
-                                _ => return Err(CmdError::InvalidArgument("Invalid command".to_string()))
-                            }            
-                        },
-                        None => return Err(CmdError::NoCmdError) 
-                    };
-                };
-                return Err(CmdError::NoCmdError);
-            },
-            _ => return Err(CmdError::UnsupportedCmdStructure),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum CmdOption {
-    EX(Option<u64>), // expire in x seconds
-    PX(Option<u64>), // expire in x miliseconds
-}
-
-impl CmdOption {
-    fn set(key: String, value: u64) -> Option<Self> {
-        match Self::match_key(key)? {
-            Self::EX(_) => Some(Self::EX(Some(value))),
-            Self::PX(_) => Some(Self::PX(Some(value))),
-        }
-    }
-
-    fn match_key(key: String) -> Option<Self> {
-        match key.to_uppercase() {
-            k if k == KW_EX => Some(Self::EX(None)),
-            k if k == KW_PX => Some(Self::PX(None)),
-            _ => return None
-        }
-    } 
-}
-
-// Stored value types in Cmd
+// Stored value types for CmdHandler
 #[derive(Debug)]
 enum StoreValue {
     Str(String),
@@ -360,22 +44,119 @@ struct StoreItem { value: StoreValue, expired_at: Option<u64> }
 
 type Task = Box<dyn FnOnce(&mut CmdHandler) -> Option<String>>;
 
+//---------Request registry: manage waiting request for CmdHandler
+struct RequestEntry {
+    pub client_id: u64,
+    pub key: String,
+    pub deadline: u64,
+    pub backlog_task: Task,     // Task run when request fullfilled
+    pub deadline_task: Task,    // Task run at deadline
+}
+
+struct RequestRegistry {
+    // timestamp - request
+    store: HashMap<u64, RequestEntry>,
+    
+    // key - queue of timestamp
+    backlog: HashMap<String, VecDeque<u64>>,
+
+    // deadline - timestamp
+    deadline: BTreeMap<u64, u64>,
+    timer_fd: i32,
+}
+
+impl RequestRegistry {
+    pub fn new(timer_fd: i32) -> Self {
+        Self {
+            store: HashMap::new(),
+            backlog: HashMap::new(),
+            deadline: BTreeMap::new(),
+            timer_fd,
+        }
+    }
+    
+    pub fn insert(
+        &mut self, 
+        timestamp: u64,
+        client_id: u64, 
+        key: String, 
+        deadline: u64,
+        backlog_task: Task,
+        deadline_task: Task) {
+        self.backlog.entry(key.clone())
+            .or_insert_with(VecDeque::new).push_back(timestamp);
+        if deadline > 0 {
+            self.deadline.insert(deadline, timestamp);
+            self.set_timer_fd();
+        };
+            
+        self.store.insert(timestamp, RequestEntry {
+            client_id, key, deadline, backlog_task, deadline_task
+        });
+    }
+    
+    pub fn remove(&mut self, timestamp: &u64) -> Option<RequestEntry> {
+        let entry = self.store.remove(timestamp)?;
+        if let Some(q) = self.backlog.get_mut(&entry.key) {
+            // This will have no effect if backlog is pooped
+            // when a backlog condition fullfilled
+            q.retain(|&t| t!= *timestamp);
+            if q.is_empty() {
+                self.backlog.remove(&entry.key);
+                self.set_timer_fd();
+            }
+        };
+        self.deadline.remove(&entry.deadline);
+        Some(entry)
+    }
+
+    fn set_timer_fd(&self) {
+        match self.deadline.first_key_value() {
+            Some((deadline, _)) => {
+                let now = now();
+                let timeout = if *deadline > now {
+                    (deadline - now) as i64
+                } else {
+                    // Schedule to be fired immediately in next loop
+                    // unit ms
+                    1
+                };
+                println!("Set timer for deadline {}, timeout {}", deadline, timeout);
+                timer_create_event(self.timer_fd, timeout);
+            },
+            None => {},
+        }
+    }
+
+    pub fn is_backlog_empty(&self, key: &str) -> bool {
+        match self.backlog.get(key) {
+            Some(list) => {
+                list.is_empty()
+            },
+            None => false
+        }
+    }
+
+    pub fn get_nearest_deadline(&self) -> Option<(&u64, &u64)> {
+        self.deadline.first_key_value() 
+    }
+}
+
 //---------Command handler, convert Cmd struct into action
 pub struct CmdHandler {
-    timer_fd: i32,
-    
     // client_id, message
     pub response_queue: Vec<(u64, String)>,
     data: HashMap<String, StoreItem>,
+    registry: RequestRegistry,
 
     // timestamp - (client, deadline, key)
-    request_table: HashMap<u64, (u64, u64, String)>,
+    // request_table: HashMap<u64, (u64, u64, String)>,
 
     // key - timestamp, client, deadline, task
-    pub backlog: HashMap<String, VecDeque<(u64, u64, u64, Task)>>,
+    // pub backlog: HashMap<String, VecDeque<(u64, u64, u64, Task)>>,
 
     // deadline - timestamp, client, key, task
-    deadline_task: BTreeMap<u64, (u64, u64, String, Task)>,       // same key with deadline_client, sorted
+    // deadline_task: BTreeMap<u64, (u64, u64, String, Task)>,
 }
 
 // Thx to the loop nature, each BLPOP request has distinct timestamp
@@ -383,14 +164,14 @@ pub struct CmdHandler {
 impl CmdHandler {
     pub fn new(timer_fd: i32) -> Self{
         Self {
-            timer_fd,
             response_queue: Vec::new(),
             data: HashMap::new(),
+            registry: RequestRegistry::new(timer_fd),
             // hashes: HashMap::new(),
             // lists: HashMap::new(),
-            request_table: HashMap::new(),
-            backlog: HashMap::new(),
-            deadline_task: BTreeMap::new(),
+            // request_table: HashMap::new(),
+            // backlog: HashMap::new(),
+            // deadline_task: BTreeMap::new(),
         }
     }
 
@@ -409,6 +190,7 @@ impl CmdHandler {
                     Cmd::LPOP{ key, length } => self.cmd_lpop(key, length),
                     Cmd::BLPOP { key, timeout_ms } => self.cmd_blpop(key, timeout_ms, client_id),
                     Cmd::TYPE(key) => self.cmd_type(key),
+                    Cmd::XADD { key, id, value } => self.cmd_xadd(key, id, value),
                 }
             },
             Err(e) => Self::cmd_err(e.to_string())
@@ -416,15 +198,15 @@ impl CmdHandler {
     }
     
     // TODO: all these returns should be of Result<>
-    fn now() -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH)
-            .unwrap().as_millis() as u64
-    }
+    // fn now() -> u64 {
+    //     SystemTime::now().duration_since(UNIX_EPOCH)
+    //         .unwrap().as_millis() as u64
+    // }
 
-    fn extract_exp(opt: Option<CmdOption>) -> Option<u64> {
+    fn extract_deadline(opt: Option<CmdOption>) -> Option<u64> {
         match opt {
             Some(arg) => {
-                let now = Self::now(); 
+                let now = now(); 
                 match arg {
                     CmdOption::EX(x) => Some(now / 1000 + x.unwrap()),
                     CmdOption::PX(x) => Some(now + x.unwrap()),
@@ -434,47 +216,47 @@ impl CmdHandler {
         }
     }
 
-    fn add_to_backlog(
-        &mut self, 
-        key: String,
-        timestamp: u64,
-        client_id: u64,
-        deadline: u64,
-        backlog_task: Task)
-    {
-        if deadline > 0 {
-            println!("Add to backlog deadline {}, key {}, client {}", deadline, &key, client_id);
-            self.backlog.entry(key.clone())
-                .or_insert_with(VecDeque::new)
-                .push_back((timestamp, client_id, deadline, backlog_task));
-        
-            // Why register a callback instead of call directly by parent scope?
-            // For robusness, there could be various type of callback,
-            // not just empty array response
-            let expire_task = Box::new(
-                move |handler: &mut CmdHandler| {
-                    let msg = Self::get_null_array().unwrap();
-                    handler.response_queue.push((client_id, msg));
-                    println!("Push to response queue: {:?}", &handler.response_queue.last().unwrap());
-                None
-                }
-            );
-            self.deadline_task.insert(deadline, (timestamp, client_id, key, expire_task));
-        
-            // Set timer fd with next/earliest deadline
-            // This will overwrite the current timeout with ealier timeout
-            self.set_timer_fd();
-        } else {
-            // No timeout, put to wait queue
-            println!("No deadline, still add to backlog key {} client {} task", &key, client_id);
-            self.backlog.entry(key)
-                .or_insert_with(VecDeque::new)
-                .push_back((timestamp, client_id, 0, backlog_task));
-        }
-    }
+    // fn add_to_backlog(
+    //     &mut self, 
+    //     key: String,
+    //     timestamp: u64,
+    //     client_id: u64,
+    //     deadline: u64,
+    //     backlog_task: Task)
+    // {
+    //     if deadline > 0 {
+    //         println!("Add to backlog deadline {}, key {}, client {}", deadline, &key, client_id);
+    //         self.backlog.entry(key.clone())
+    //             .or_insert_with(VecDeque::new)
+    //             .push_back((timestamp, client_id, deadline, backlog_task));
+    //
+    //         // Why register a callback instead of call directly by parent scope?
+    //         // For robusness, there could be various type of callback,
+    //         // not just empty array response
+    //         let expire_task = Box::new(
+    //             move |handler: &mut CmdHandler| {
+    //                 let msg = Self::get_null_array().unwrap();
+    //                 handler.response_queue.push((client_id, msg));
+    //                 println!("Push to response queue: {:?}", &handler.response_queue.last().unwrap());
+    //             None
+    //             }
+    //         );
+    //         self.deadline_task.insert(deadline, (timestamp, client_id, key, expire_task));
+    //
+    //         // Set timer fd with next/earliest deadline
+    //         // This will overwrite the current timeout with ealier timeout
+    //         self.set_timer_fd();
+    //     } else {
+    //         // No timeout, put to wait queue
+    //         println!("No deadline, still add to backlog key {} client {} task", &key, client_id);
+    //         self.backlog.entry(key)
+    //             .or_insert_with(VecDeque::new)
+    //             .push_back((timestamp, client_id, 0, backlog_task));
+    //     }
+    // }
 
     fn get_deadline(timeout_ms: Option<i64>) -> (u64, u64) {
-        let now = Self::now();
+        let now = now();
         match timeout_ms{
             Some(timeout) => {
                 (now, now + timeout as u64)
@@ -483,41 +265,41 @@ impl CmdHandler {
         }
     }
 
-    fn set_timer_fd(&self) {
-        match self.deadline_task.first_key_value() {
-            Some((deadline, _)) => {
-                let now = Self::now();
-                let timeout = if *deadline > now {
-                    (deadline - now) as i64
-                } else {
-                    // Schedule to be fired immediately in next loop
-                    // unit ms
-                    1
-                };
-                println!("Set timer for deadline {}, timeout {}", deadline, timeout);
-                timer_create_event(self.timer_fd, timeout);
-            },
-            None => {},
-        }
-    }
+    // fn set_timer_fd(&self) {
+    //     match self.deadline_task.first_key_value() {
+    //         Some((deadline, _)) => {
+    //             let now = Self::now();
+    //             let timeout = if *deadline > now {
+    //                 (deadline - now) as i64
+    //             } else {
+    //                 // Schedule to be fired immediately in next loop
+    //                 // unit ms
+    //                 1
+    //             };
+    //             println!("Set timer for deadline {}, timeout {}", deadline, timeout);
+    //             timer_create_event(self.timer_fd, timeout);
+    //         },
+    //         None => {},
+    //     }
+    // }
 
-    fn remove_request(&mut self, timestamp: u64) {
-        self.request_table.remove(&timestamp);
-    }
+    // fn remove_request(&mut self, timestamp: u64) {
+    //     self.request_table.remove(&timestamp);
+    // }
 
-    fn remove_backlog(&mut self, key: String, timestamp: u64) {
-        if let Some(list) = self.backlog.get_mut(&key) {
-            list.retain(|(t, _, _, _)| {*t != timestamp});
-            println!("Remove timestamp {} from backlog", timestamp);
-        }
-    }
+    // fn remove_backlog(&mut self, key: String, timestamp: u64) {
+    //     if let Some(list) = self.backlog.get_mut(&key) {
+    //         list.retain(|(t, _, _, _)| {*t != timestamp});
+    //         println!("Remove timestamp {} from backlog", timestamp);
+    //     }
+    // }
 
-    fn remove_deadline(&mut self, deadline: u64) {
-        if deadline > 0 {
-            self.deadline_task.remove(&deadline);
-            self.set_timer_fd();
-        }
-    }
+    // fn remove_deadline(&mut self, deadline: u64) {
+    //     if deadline > 0 {
+    //         self.deadline_task.remove(&deadline);
+    //         self.set_timer_fd();
+    //     }
+    // }
 
     fn get_null_array() -> Option<String> {
         RespType::Array { length: 0, value: None }.serialize()
@@ -527,19 +309,51 @@ impl CmdHandler {
         // A callback fired when deadline expired (triggere by timer fd):
         // Execute callback in deadline_task
         println!("Deadline callback by main loop");
-        if let Some((deadline, (timestamp, client_id, key, task))) = self.deadline_task.pop_first() {
-            println!("Found current deadline {}, running deadline task", deadline);
-            task(self); 
-            // Remove everything else
-            self.remove_backlog(key, timestamp);
-            self.remove_request(timestamp);
-        } else {
-            println!("No queued deadline task")
-        };
+        // if let Some((deadline, (timestamp, client_id, key, task))) = self.deadline_task.pop_first() {
+        //     println!("Found current deadline {}, running deadline task", deadline);
+        //     task(self); 
+        //     // Remove everything else
+        //     self.remove_backlog(key, timestamp);
+        //     self.remove_request(timestamp);
+        // } else {
+        //     println!("No queued deadline task")
+        // };
+        let timestamp = *self.registry.get_nearest_deadline().unwrap().1;
+        let entry = self.registry.remove(&timestamp).unwrap();
+        (entry.deadline_task)(self);
     }
 
     fn response_ok() -> Option<String> {
         RespType::SimpleStr(Some("OK".to_string())).serialize()
+    }
+    
+    pub fn serve_queue(&mut self) {
+        // Execute once at the end of main each event loop,
+        // matching BLPOP queue with available item,
+        // other LPOP requests are served at request time at client loop
+        let mut timestamps: Vec<u64> = Vec::new();
+
+        for (k, v) in self.registry.backlog.iter() {
+            if let Some(item) = self.data.get(k) {
+                match &item.value {
+                    StoreValue::List(list) => {
+                        let max_pop = v.len().min(list.len());
+                        v.iter().take(max_pop).for_each(|x| timestamps.push(*x));
+                    },
+                    _ => {},
+                }
+            }
+        };
+
+        let mut tasks: Vec<Task> = Vec::new();
+        for t in &timestamps {
+            if let Some(entry) = self.registry.remove(t) {
+                tasks.push(entry.backlog_task);
+            }
+        }
+        for task in tasks {
+            task(self);
+        }
     }
 
     fn cmd_ping() -> Option<String> {
@@ -556,7 +370,7 @@ impl CmdHandler {
 
     fn cmd_set(&mut self, key: String, value: String, opt: Option<CmdOption>) -> Option<String> {
         // Extract cmd for handling instruction
-        let exp = Self::extract_exp(opt); 
+        let exp = Self::extract_deadline(opt); 
         self.data.insert(key, StoreItem {
             value: StoreValue::Str(value), expired_at: exp});
         Self::response_ok()
@@ -568,7 +382,7 @@ impl CmdHandler {
                 StoreValue::Str(s) => {
                     // Check for expiration
                     // TODO:: implement removed at expiration
-                    let expired = item.expired_at.map_or(false, |x| Self::now() > x);
+                    let expired = item.expired_at.map_or(false, |x| now() > x);
                     let value = if expired { None } else { Some(s.clone()) };
                     RespType::BulkStr{
                         length: value.as_ref().map_or(0, |s| s.len()),
@@ -589,9 +403,6 @@ impl CmdHandler {
             StoreItem {
                 value: StoreValue::List(VecDeque::new()),
                 expired_at: None });
-
-        // Create equivalent backlog
-        self.backlog.entry(key.clone()).or_insert_with(VecDeque::new);
         
         match &mut item.value {
             StoreValue::List(list) => {
@@ -672,9 +483,6 @@ impl CmdHandler {
             StoreItem { 
                 value: StoreValue::List(VecDeque::new()),
                 expired_at: None } );
-        
-        // Create equivalent backlog if not exists
-        self.backlog.entry(key.clone()).or_insert_with(VecDeque::new);
 
         match &mut item.value {
             StoreValue::List(list) => {
@@ -760,9 +568,9 @@ impl CmdHandler {
         let key1 = key.clone();
         println!("BLPOP at {}, key {}, timeout ms {:?}", deadline, &key, timeout_ms);
 
-        // Task when item available to pop
+        // Task to run when item available to pop
         // Checking for key and type must be done by parent calls this task
-        let task = Box::new(move |handler: &mut CmdHandler| {
+        let backlog_task = Box::new(move |handler: &mut CmdHandler| {
             // Task triggered when item available
             // pop item
             println!("Running backlog task for BLPOP at {}", deadline);
@@ -788,8 +596,19 @@ impl CmdHandler {
                 println!("Push to response queue: , {:?}", &handler.response_queue.last().unwrap());
 
                 // Disable deadline
-                handler.remove_deadline(deadline);
+                // handler.remove_deadline(deadline);
+                handler.registry.remove(&timestamp);
             };
+            None
+        });
+
+        let deadline_task = Box::new(move |handler: &mut CmdHandler| {
+            let msg = Self::get_null_array().unwrap();
+            handler.response_queue.push((client_id, msg));
+            println!(
+                "Push to response queue: {:?}", 
+                &handler.response_queue.last().unwrap());
+            handler.registry.remove(&timestamp);
             None
         });
  
@@ -800,8 +619,9 @@ impl CmdHandler {
                     StoreValue::List(list) => {
                         // If key-list exists, key-backlog queue must exists
                         // as being created by rpush and lpush
-                        let backlog = self.backlog.get_mut(&key1).unwrap();
-                        if backlog.is_empty() && !list.is_empty() {
+                        // let backlog = self.backlog.get_mut(&key1).unwrap();
+                        // if backlog.is_empty() && !list.is_empty() {
+                        if self.registry.is_backlog_empty(&key1) && !list.is_empty() {
                             // No other client in waiting list and item available, pop
                             let item = list.pop_front().unwrap();
                             let mut output = RespType::Array{ length: 2, value: None};
@@ -812,8 +632,10 @@ impl CmdHandler {
                             output.serialize()
                         } else {
                             // Wait
-                            self.request_table.insert(timestamp, (client_id, deadline, key1.clone()));
-                            self.add_to_backlog(key1, timestamp, client_id, deadline, task);
+                            // self.request_table.insert(timestamp, (client_id, deadline, key1.clone()));
+                            // self.add_to_backlog(key1, timestamp, client_id, deadline, task);
+                            self.registry.insert(
+                                timestamp, client_id, key1, deadline, backlog_task, deadline_task);
                             None
                         }
                     },
@@ -825,8 +647,10 @@ impl CmdHandler {
             None => {
                 // No key-list exists, also no key-backlog exists
                 // wait in queue for client
-                self.request_table.insert(timestamp, (client_id, deadline, key1.clone()));
-                self.add_to_backlog(key1, timestamp, client_id, deadline, task);
+                // self.request_table.insert(timestamp, (client_id, deadline, key1.clone()));
+                // self.add_to_backlog(key1, timestamp, client_id, deadline, task);
+                self.registry.insert(
+                    timestamp, client_id, key1, deadline, backlog_task, deadline_task);
                 None
             }
         }
@@ -842,38 +666,14 @@ impl CmdHandler {
         RespType::SimpleStr(Some(ktype)).serialize()
     }
 
-    pub fn serve_queue(&mut self) {
-        // Execute once at the end of main each event loop,
-        // matching BLPOP queue with available item,
-        // other LPOP requests are served at request time at client loop
-        let mut tasks = VecDeque::new();
-        let mut timestamps: Vec<u64> = Vec::new();
-        let mut deadlines: Vec<u64> = Vec::new();
-
-        for (k, v) in self.backlog.iter_mut() {
-            if let Some(item) = self.data.get_mut(k) {
-                match &mut item.value {
-                    StoreValue::List(list) => {
-                        let max_pop = v.len().min(list.len());
-                        for _ in 0..max_pop {
-                            let (timestamp, _, deadline, task) = v.pop_front().unwrap();
-                            tasks.push_back(task);
-                            timestamps.push(timestamp);
-                            deadlines.push(deadline);
-                        }
-                    },
-                    _ => {},
-                }
-            }
-        };
-        while !tasks.is_empty() {
-            tasks.pop_front().unwrap()(self);
-        };
-        for t in timestamps {
-            self.remove_request(t);
-        };
-        for d in deadlines {
-            self.remove_deadline(d);
-        };
-    }
+    fn cmd_xadd(&mut self, key: String, id: String, value: Vec<String>) -> Option<String> {
+        // TODO: fully impliment this
+        // just return id in this stage
+        self.data.insert(
+            key, 
+            StoreItem {
+                value: StoreValue::Stream(Vec::new()),
+                expired_at: None });
+        RespType::BulkStr { length: id.len(), value: Some(id) }.serialize()
+    }    
 }
