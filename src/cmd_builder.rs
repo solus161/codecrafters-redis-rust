@@ -66,7 +66,7 @@ pub enum Cmd {
     LPOP{ key: String, length: Option<usize> },
     BLPOP{ key: String, timeout_ms: Option<i64> },
     TYPE(String),
-    XADD{ key: String, id: String, value: Vec<String>},
+    XADD{ key: String, id: (Option<u64>, Option<u64>), value: Vec<String>},
 }
 
 impl Cmd {
@@ -241,9 +241,34 @@ impl Cmd {
         let key: String = values.pop_front()
             .ok_or(CmdError::MissingArgument("No key provided for XADD".to_string()))?
             .get_value().unwrap().str().unwrap();
-        let id: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No id provided for XADD".to_string()))?
+        let timestamp_id: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No timeid provided for XADD".to_string()))?
             .get_value().unwrap().str().unwrap();
+
+        // Parse timestamp_id
+        let id: (Option<u64>, Option<u64>);
+        if timestamp_id == "*".to_string() {
+            id = (None, None);
+        } else {
+            let vec_splitted: Vec<&str> = timestamp_id.split('-').collect();
+            match vec_splitted.as_slice() {
+                [t, i] => {
+                    let ts: Option<u64> = Some(t.parse::<u64>().map_err(
+                        |_| CmdError::InvalidArgument("id for XADD".to_string())
+                    )?);
+
+                    if *i == "*".to_string() {
+                        id = (ts, None);  
+                    } else {
+                        let idx: Option<u64> = Some(i.parse::<u64>().map_err(
+                            |_| CmdError::InvalidArgument("id for XADD".to_string())
+                        )?);
+                        id = (ts, idx)
+                    }
+                },
+                _ => return Err(CmdError::InvalidArgument("id for XADD".to_string()))
+            };
+        }
         
         let mut value: Vec<String> = Vec::new();
         for v in values {

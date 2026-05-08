@@ -528,6 +528,12 @@ impl RespType {
                     None => None,
                 }
             },
+            Self::Error(o) => {
+                match o {
+                    Some(s) => Some(format!("{}{}{}", &prefix, s, DELIMITER)),
+                    None => None,
+                }
+            },
             _ => {
                 return None
             }

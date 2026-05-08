@@ -2,8 +2,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::collections::{HashMap, VecDeque, hash_map::Entry };
 use std::string::ParseError;
 
-use std::u64;
-
 use libc::write;
 
 use crate::resp::{ RespType, RespValue };
@@ -19,7 +17,8 @@ enum StoreValue {
     Set(HashSet<String>),
     ZSet(BTreeMap<String, f64>),
     Hash(HashMap<String, String>),
-    Stream(Vec<String>),            // String is just placeholder for now
+    // timestamp id - (timestamp, order, Vec of String)
+    Stream(BTreeMap<(u64, u64), Vec<String>>),
     VectorSet(String),
     None
 }
@@ -148,18 +147,7 @@ pub struct CmdHandler {
     pub response_queue: Vec<(u64, String)>,
     data: HashMap<String, StoreItem>,
     registry: RequestRegistry,
-
-    // timestamp - (client, deadline, key)
-    // request_table: HashMap<u64, (u64, u64, String)>,
-
-    // key - timestamp, client, deadline, task
-    // pub backlog: HashMap<String, VecDeque<(u64, u64, u64, Task)>>,
-
-    // deadline - timestamp, client, key, task
-    // deadline_task: BTreeMap<u64, (u64, u64, String, Task)>,
-}
-
-// Thx to the loop nature, each BLPOP request has distinct timestamp
+ }
 
 impl CmdHandler {
     pub fn new(timer_fd: i32) -> Self{
@@ -167,11 +155,6 @@ impl CmdHandler {
             response_queue: Vec::new(),
             data: HashMap::new(),
             registry: RequestRegistry::new(timer_fd),
-            // hashes: HashMap::new(),
-            // lists: HashMap::new(),
-            // request_table: HashMap::new(),
-            // backlog: HashMap::new(),
-            // deadline_task: BTreeMap::new(),
         }
     }
 
@@ -196,12 +179,6 @@ impl CmdHandler {
             Err(e) => Self::cmd_err(e.to_string())
         } 
     }
-    
-    // TODO: all these returns should be of Result<>
-    // fn now() -> u64 {
-    //     SystemTime::now().duration_since(UNIX_EPOCH)
-    //         .unwrap().as_millis() as u64
-    // }
 
     fn extract_deadline(opt: Option<CmdOption>) -> Option<u64> {
         match opt {
@@ -215,46 +192,7 @@ impl CmdHandler {
             None => None
         }
     }
-
-    // fn add_to_backlog(
-    //     &mut self, 
-    //     key: String,
-    //     timestamp: u64,
-    //     client_id: u64,
-    //     deadline: u64,
-    //     backlog_task: Task)
-    // {
-    //     if deadline > 0 {
-    //         println!("Add to backlog deadline {}, key {}, client {}", deadline, &key, client_id);
-    //         self.backlog.entry(key.clone())
-    //             .or_insert_with(VecDeque::new)
-    //             .push_back((timestamp, client_id, deadline, backlog_task));
-    //
-    //         // Why register a callback instead of call directly by parent scope?
-    //         // For robusness, there could be various type of callback,
-    //         // not just empty array response
-    //         let expire_task = Box::new(
-    //             move |handler: &mut CmdHandler| {
-    //                 let msg = Self::get_null_array().unwrap();
-    //                 handler.response_queue.push((client_id, msg));
-    //                 println!("Push to response queue: {:?}", &handler.response_queue.last().unwrap());
-    //             None
-    //             }
-    //         );
-    //         self.deadline_task.insert(deadline, (timestamp, client_id, key, expire_task));
-    //
-    //         // Set timer fd with next/earliest deadline
-    //         // This will overwrite the current timeout with ealier timeout
-    //         self.set_timer_fd();
-    //     } else {
-    //         // No timeout, put to wait queue
-    //         println!("No deadline, still add to backlog key {} client {} task", &key, client_id);
-    //         self.backlog.entry(key)
-    //             .or_insert_with(VecDeque::new)
-    //             .push_back((timestamp, client_id, 0, backlog_task));
-    //     }
-    // }
-
+    
     fn get_deadline(timeout_ms: Option<i64>) -> (u64, u64) {
         let now = now();
         match timeout_ms{
@@ -265,42 +203,6 @@ impl CmdHandler {
         }
     }
 
-    // fn set_timer_fd(&self) {
-    //     match self.deadline_task.first_key_value() {
-    //         Some((deadline, _)) => {
-    //             let now = Self::now();
-    //             let timeout = if *deadline > now {
-    //                 (deadline - now) as i64
-    //             } else {
-    //                 // Schedule to be fired immediately in next loop
-    //                 // unit ms
-    //                 1
-    //             };
-    //             println!("Set timer for deadline {}, timeout {}", deadline, timeout);
-    //             timer_create_event(self.timer_fd, timeout);
-    //         },
-    //         None => {},
-    //     }
-    // }
-
-    // fn remove_request(&mut self, timestamp: u64) {
-    //     self.request_table.remove(&timestamp);
-    // }
-
-    // fn remove_backlog(&mut self, key: String, timestamp: u64) {
-    //     if let Some(list) = self.backlog.get_mut(&key) {
-    //         list.retain(|(t, _, _, _)| {*t != timestamp});
-    //         println!("Remove timestamp {} from backlog", timestamp);
-    //     }
-    // }
-
-    // fn remove_deadline(&mut self, deadline: u64) {
-    //     if deadline > 0 {
-    //         self.deadline_task.remove(&deadline);
-    //         self.set_timer_fd();
-    //     }
-    // }
-
     fn get_null_array() -> Option<String> {
         RespType::Array { length: 0, value: None }.serialize()
     }
@@ -308,16 +210,6 @@ impl CmdHandler {
     pub fn callback_deadline_expire(&mut self) {
         // A callback fired when deadline expired (triggere by timer fd):
         // Execute callback in deadline_task
-        println!("Deadline callback by main loop");
-        // if let Some((deadline, (timestamp, client_id, key, task))) = self.deadline_task.pop_first() {
-        //     println!("Found current deadline {}, running deadline task", deadline);
-        //     task(self); 
-        //     // Remove everything else
-        //     self.remove_backlog(key, timestamp);
-        //     self.remove_request(timestamp);
-        // } else {
-        //     println!("No queued deadline task")
-        // };
         let timestamp = *self.registry.get_nearest_deadline().unwrap().1;
         let entry = self.registry.remove(&timestamp).unwrap();
         (entry.deadline_task)(self);
@@ -572,7 +464,6 @@ impl CmdHandler {
         // Checking for key and type must be done by parent calls this task
         let backlog_task = Box::new(move |handler: &mut CmdHandler| {
             // Task triggered when item available
-            // pop item
             println!("Running backlog task for BLPOP at {}", deadline);
             
             let popped = handler.data.get_mut(&key)
@@ -584,7 +475,6 @@ impl CmdHandler {
                 });
             println!("Item available {:?}", popped);
 
-            // let item = handler.data.get_mut(&key).unwrap();
             if let Some(item) = popped {
                 // Construct response
                 let mut output = RespType::Array { length: 2, value: None };
@@ -596,7 +486,6 @@ impl CmdHandler {
                 println!("Push to response queue: , {:?}", &handler.response_queue.last().unwrap());
 
                 // Disable deadline
-                // handler.remove_deadline(deadline);
                 handler.registry.remove(&timestamp);
             };
             None
@@ -632,8 +521,6 @@ impl CmdHandler {
                             output.serialize()
                         } else {
                             // Wait
-                            // self.request_table.insert(timestamp, (client_id, deadline, key1.clone()));
-                            // self.add_to_backlog(key1, timestamp, client_id, deadline, task);
                             self.registry.insert(
                                 timestamp, client_id, key1, deadline, backlog_task, deadline_task);
                             None
@@ -647,8 +534,6 @@ impl CmdHandler {
             None => {
                 // No key-list exists, also no key-backlog exists
                 // wait in queue for client
-                // self.request_table.insert(timestamp, (client_id, deadline, key1.clone()));
-                // self.add_to_backlog(key1, timestamp, client_id, deadline, task);
                 self.registry.insert(
                     timestamp, client_id, key1, deadline, backlog_task, deadline_task);
                 None
@@ -666,14 +551,63 @@ impl CmdHandler {
         RespType::SimpleStr(Some(ktype)).serialize()
     }
 
-    fn cmd_xadd(&mut self, key: String, id: String, value: Vec<String>) -> Option<String> {
-        // TODO: fully impliment this
-        // just return id in this stage
-        self.data.insert(
-            key, 
-            StoreItem {
-                value: StoreValue::Stream(Vec::new()),
-                expired_at: None });
-        RespType::BulkStr { length: id.len(), value: Some(id) }.serialize()
+    fn cmd_xadd(
+        &mut self,
+        key: String,
+        id: (Option<u64>, Option<u64>), 
+        // For this stage, id is explicitely declare
+        // TODO: handle case id = * and id = 123-*
+        value: Vec<String>) -> Option<String> {
+        self.data.entry(key.clone()).or_insert(StoreItem {
+            value: StoreValue::Stream(BTreeMap::new()),
+            expired_at: None });
+
+        let id_valid = match &self.data.get(&key).unwrap().value {
+            StoreValue::Stream(b) => {
+                let ts = id.0.unwrap();
+                let id = id.1.unwrap();
+
+                if ts == 0 && id == 0 {
+                    return RespType::Error(Some(
+                        "ERR The ID specified in XADD must be greater than 0-0".to_string())
+                    ).serialize()
+                };
+
+                match b.last_key_value() {
+                    Some((k, _)) => {
+                        let (ts_last, id_last) = *k;
+                        ts > ts_last || (ts == ts_last && id > id_last) 
+                    },
+                    None => true,
+                }
+            },
+            _ => {
+                return RespType::Error(Some(
+                    CmdError::UnsupportedCommand(key).to_string())
+                ).serialize();
+            }
+        };
+
+        if id_valid {
+            let stream_id = (id.0.unwrap(), id.1.unwrap());
+            match &mut self.data.get_mut(&key).unwrap().value {
+                StoreValue::Stream(btree) => {
+                    btree.insert(stream_id, value);
+                    let msg = format!("{}-{}", stream_id.0, stream_id.1);
+                    RespType::BulkStr { length: msg.len(), value: Some(msg) }
+                        .serialize()
+                },
+                _ => {
+                    RespType::Error(Some(
+                        CmdError::UnsupportedCommand(key).to_string())
+                    ).serialize()
+                }
+           }
+        } else {
+            let msg = "ERR The ID specified in XADD is equal or smaller than the target stream top item";
+            return RespType::Error(Some(
+                msg.to_string())
+            ).serialize()
+        }
     }    
 }
