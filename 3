@@ -558,6 +558,15 @@ impl CmdHandler {
         // For this stage, id is explicitely declare
         // TODO: handle case id = * and id = 123-*
         value: Vec<String>) -> Option<String> {
+        // Custom enum for validation result
+        enum IdValid {
+            Assigned(u64),
+            Auto,
+            None,
+        }
+        
+        let id_valid = (IdValid::None, IdValid::None);
+
         // Add key if not exists
         self.data.entry(key.clone()).or_insert(StoreItem {
             value: StoreValue::Stream(BTreeMap::new()),
@@ -573,56 +582,47 @@ impl CmdHandler {
             "ERR The ID specified in XADD must be greater than 0-0".to_string())
         ).serialize();
 
-        let msg_invalid_format = RespType::Error(Some(
-            "ERR Invalid stream id format".to_string())
-        ).serialize();
-
         // Check valid type
-        let id_valid: (u64, u64) = match &self.data.get(&key).unwrap().value {
+        id_valid = match self.data.get(&key).unwrap().value {
             StoreValue::Stream(b) => {
                 match id {
                     (Some(t), Some(i)) => {
                         if t == 0 && i == 0 {
-                            return msg_invalid_00
+                            return RespType::Error(Some(
+                                "ERR The ID specified in XADD must be greater than 0-0".to_string())
+                            ).serialize()
                         };
 
                         match b.last_key_value() {
                             Some((k, _)) => {
                                 let (t_last, i_last) = *k;
                                 if t > t_last || (t == t_last && i > i_last) {
-                                    (t, i)
+                                    (IdValid::Assigned(t), IdValid::Assigned(i))
                                 } else {
                                     return msg_invalid_last 
                                 } 
                             },
-                            None => (t, i),
-                        }
+                            None => (IdValid::Assigned(t), IdValid::Assigned(i)),
+                        };
                     },
                     (Some(t), None) => {
                         match b.last_key_value() {
                             Some((k, _)) => {
                                 let (t_last, i_last) = *k;
-                                if t == t_last {
-                                    (t, i_last + 1)
-                                }
-                                else if t > t_last {
-                                    (t, 0)
-                                } else {
-                                    return msg_invalid_last
+                                if t >= t_last {
+                                    (IdValid::Assigned(t), IdValid::Auto)
                                 }
                             },
-                            None => {
-                                if t == 0 {(t, 1)} else {(t, 0)}
-                            }
+                            None => (IdValid::Assigned(t), IdValid::Assigned(i)) 
                         } 
                     },
                     (None, None) => {
-                        (now(), 0)
+
                     },
                     _ => {
-                        return msg_invalid_format
+
                     }
-                }
+                };
             },
             _ => {
                 return RespType::Error(Some(
@@ -632,14 +632,54 @@ impl CmdHandler {
 
         };
 
-        match &mut self.data.get_mut(&key).unwrap().value {
-            StoreValue::Stream(btree) => {
-                btree.insert((id_valid.0, id_valid.1), value);
-                let msg = format!("{}-{}", id_valid.0, id_valid.1);
-                RespType::BulkStr { length: msg.len(), value: Some(msg) }
-                    .serialize()
+        
+
+        let id_valid = match &self.data.get(&key).unwrap().value {
+            storevalue::stream(b) => {
+                let ts = id.0.unwrap();
+                let id = id.1.unwrap();
+
+                if ts == 0 && id == 0 {
+                    return RespType::Error(Some(
+                        "ERR The ID specified in XADD must be greater than 0-0".to_string())
+                    ).serialize()
+                };
+
+                match b.last_key_value() {
+                    Some((k, _)) => {
+                        let (ts_last, id_last) = *k;
+                        ts > ts_last || (ts == ts_last && id > id_last) 
+                    },
+                    None => true,
+                }
             },
-            _ => None
+            _ => {
+                return RespType::Error(Some(
+                    CmdError::UnsupportedCommand(key).to_string())
+                ).serialize();
+            }
+        };
+
+        if id_valid {
+            let stream_id = (id.0.unwrap(), id.1.unwrap());
+            match &mut self.data.get_mut(&key).unwrap().value {
+                StoreValue::Stream(btree) => {
+                    btree.insert(stream_id, value);
+                    let msg = format!("{}-{}", stream_id.0, stream_id.1);
+                    RespType::BulkStr { length: msg.len(), value: Some(msg) }
+                        .serialize()
+                },
+                _ => {
+                    RespType::Error(Some(
+                        CmdError::UnsupportedCommand(key).to_string())
+                    ).serialize()
+                }
+           }
+        } else {
+            let msg = "ERR The ID specified in XADD is equal or smaller than the target stream top item";
+            return RespType::Error(Some(
+                msg.to_string())
+            ).serialize()
         }
     }    
 }
