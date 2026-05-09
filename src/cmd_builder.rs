@@ -68,7 +68,7 @@ pub enum Cmd {
     BLPOP{ key: String, timeout_ms: Option<i64> },
     TYPE(String),
     XADD{ key: String, id: (Option<u64>, Option<u64>), value: Vec<String>},
-    XRANGE{ key: String, start: (Option<u64>, Option<u64>), end: (Option<u64>, Option<u64>)}
+    XRANGE{ key: String, start: (u64, u64), end: (u64, u64)}
 }
 
 impl Cmd {
@@ -284,27 +284,40 @@ impl Cmd {
         Ok(Self::XADD { key, id, value })
     }
     
-    fn _parse_stream_id_xrange(value: String) -> Result<(Option<u64>, Option<u64>), CmdError> {
+    fn _parse_stream_id_xrange(value: String, end: bool) -> Result<(u64, u64), CmdError> {
         // Parse timestamp id of stream
+        if value == "-".to_string() {
+            return Ok((0, 0))
+        };
+        
+        if value == "+".to_string() {
+            return Ok((u64::MAX, u64::MAX))
+        };
+
         let vec_splitted: Vec<&str> = value.split('-').collect();
         let id = match vec_splitted.as_slice() {
             [t, i] => {
-                let ts: Option<u64> = Some(t.parse::<u64>().map_err(
+                let ts: u64 = t.parse::<u64>().map_err(
                     |_| CmdError::InvalidArgument("id for XRANGE".to_string())
-                )?);
+                )?;
 
-                let idx: Option<u64> = Some(i.parse::<u64>().map_err(
+                let idx: u64 = i.parse::<u64>().map_err(
                     |_| CmdError::InvalidArgument("id for XRANGE".to_string())
-                )?);
+                )?;
 
                 (ts, idx)
             },
             [t] => {
-                let ts: Option<u64> = Some(t.parse::<u64>().map_err(
+                let ts: u64 = t.parse::<u64>().map_err(
                     |_| CmdError::InvalidArgument("id for XRANGE".to_string())
-                )?);
-
-                (ts, None)
+                )?;
+                
+                if !end {
+                    (ts, 0)
+                } else {
+                    (ts, u64::MAX)
+                }
+                
             }
             _ => return Err(CmdError::InvalidArgument("id for XADD".to_string()))
         };
@@ -325,8 +338,8 @@ impl Cmd {
             .get_value().unwrap().str().unwrap();
 
         // Extract start id
-        let start = Self::_parse_stream_id_xrange(start_id)?;
-        let end = Self::_parse_stream_id_xrange(end_id)?;
+        let start = Self::_parse_stream_id_xrange(start_id, false)?;
+        let end = Self::_parse_stream_id_xrange(end_id, true)?;
 
         Ok(Self::XRANGE { key, start, end })
     }

@@ -664,16 +664,14 @@ impl CmdHandler {
     fn cmd_xrange(
         &mut self,
         key: String,
-        start: (Option<u64>, Option<u64>),
-        end: (Option<u64>, Option<u64>)) -> Option<String> {
+        start: (u64, u64),
+        end: (u64, u64)) -> Option<String> {
         match self.data.get(&key) {
             Some(item) => {
                 match &item.value  {
                     StoreValue::Stream(b) => {
-                        let start_id = Self::_extract_stream_id(start, false).unwrap();
-                        let end_id = Self::_extract_stream_id(end, true).unwrap();
                         let mut kv_vec = Vec::new();
-                        for (k, v) in b.range(start_id..=end_id) {
+                        for (k, v) in b.range(start..=end) {
                             kv_vec.push((k, v.clone()));
                         };
                         
