@@ -24,6 +24,7 @@ const KW_LPOP: &str = "LPOP";
 const KW_BLPOP: &str = "BLPOP";
 const KW_TYPE: &str = "TYPE";
 const KW_XADD: &str = "XADD";
+const KW_XRANGE: &str = "XRANGE";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -67,6 +68,7 @@ pub enum Cmd {
     BLPOP{ key: String, timeout_ms: Option<i64> },
     TYPE(String),
     XADD{ key: String, id: (Option<u64>, Option<u64>), value: Vec<String>},
+    XRANGE{ key: String, start: (Option<u64>, Option<u64>), end: (Option<u64>, Option<u64>)}
 }
 
 impl Cmd {
@@ -237,20 +239,13 @@ impl Cmd {
         Ok(Self::TYPE(key))
     }
 
-    fn xadd(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
-        let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for XADD".to_string()))?
-            .get_value().unwrap().str().unwrap();
-        let timestamp_id: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No timeid provided for XADD".to_string()))?
-            .get_value().unwrap().str().unwrap();
-
-        // Parse timestamp_id
+    fn _parse_stream_id_xadd(value: String) -> Result<(Option<u64>, Option<u64>), CmdError> {
+        // Parse timestamp id of stream
         let id: (Option<u64>, Option<u64>);
-        if timestamp_id == "*".to_string() {
+        if value == "*".to_string() {
             id = (None, None);
         } else {
-            let vec_splitted: Vec<&str> = timestamp_id.split('-').collect();
+            let vec_splitted: Vec<&str> = value.split('-').collect();
             match vec_splitted.as_slice() {
                 [t, i] => {
                     let ts: Option<u64> = Some(t.parse::<u64>().map_err(
@@ -268,13 +263,72 @@ impl Cmd {
                 },
                 _ => return Err(CmdError::InvalidArgument("id for XADD".to_string()))
             };
-        }
-        
+        };
+        Ok(id)
+    }
+
+    fn xadd(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let key: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No key provided for XADD".to_string()))?
+            .get_value().unwrap().str().unwrap();
+        let timestamp_id: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No timeid provided for XADD".to_string()))?
+            .get_value().unwrap().str().unwrap();
+
+        // Parse timestamp_id
+        let id = Self::_parse_stream_id_xadd(timestamp_id)?; 
         let mut value: Vec<String> = Vec::new();
         for v in values {
             value.push(v.get_value().unwrap().str().unwrap());
         };
         Ok(Self::XADD { key, id, value })
+    }
+    
+    fn _parse_stream_id_xrange(value: String) -> Result<(Option<u64>, Option<u64>), CmdError> {
+        // Parse timestamp id of stream
+        let vec_splitted: Vec<&str> = value.split('-').collect();
+        let id = match vec_splitted.as_slice() {
+            [t, i] => {
+                let ts: Option<u64> = Some(t.parse::<u64>().map_err(
+                    |_| CmdError::InvalidArgument("id for XRANGE".to_string())
+                )?);
+
+                let idx: Option<u64> = Some(i.parse::<u64>().map_err(
+                    |_| CmdError::InvalidArgument("id for XRANGE".to_string())
+                )?);
+
+                (ts, idx)
+            },
+            [t] => {
+                let ts: Option<u64> = Some(t.parse::<u64>().map_err(
+                    |_| CmdError::InvalidArgument("id for XRANGE".to_string())
+                )?);
+
+                (ts, None)
+            }
+            _ => return Err(CmdError::InvalidArgument("id for XADD".to_string()))
+        };
+        Ok(id)
+    }
+
+    fn xrange(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let key: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No key provided for XRANGE".to_string()))?
+            .get_value().unwrap().str().unwrap();
+
+        let start_id: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No start id provided for XRANGE".to_string()))?
+            .get_value().unwrap().str().unwrap();
+    
+        let end_id: String = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No start id provided for XRANGE".to_string()))?
+            .get_value().unwrap().str().unwrap();
+
+        // Extract start id
+        let start = Self::_parse_stream_id_xrange(start_id)?;
+        let end = Self::_parse_stream_id_xrange(end_id)?;
+
+        Ok(Self::XRANGE { key, start, end })
     }
 
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
@@ -329,6 +383,9 @@ impl Cmd {
                                         },
                                         s if s == KW_XADD.to_string() => {
                                             return Self::xadd(v)
+                                        },
+                                        s if s == KW_XRANGE.to_string() => {
+                                            return Self::xrange(v)
                                         },
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))

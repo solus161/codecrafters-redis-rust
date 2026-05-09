@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::collections::{HashMap, VecDeque, hash_map::Entry };
+use std::ops::Bound::Included;
 use std::string::ParseError;
 
-use libc::write;
+use libc::{key_t, write};
 
 use crate::resp::{ RespType, RespValue };
 use crate::epoll::timer_create_event;
@@ -174,6 +175,7 @@ impl CmdHandler {
                     Cmd::BLPOP { key, timeout_ms } => self.cmd_blpop(key, timeout_ms, client_id),
                     Cmd::TYPE(key) => self.cmd_type(key),
                     Cmd::XADD { key, id, value } => self.cmd_xadd(key, id, value),
+                    Cmd::XRANGE { key, start, end } => self.cmd_xrange(key, start, end),
                 }
             },
             Err(e) => Self::cmd_err(e.to_string())
@@ -641,5 +643,79 @@ impl CmdHandler {
             },
             _ => None
         }
-    }    
+    }
+    
+    fn _extract_stream_id(
+        id: (Option<u64>, Option<u64>),
+        end: bool) -> Option<(u64, u64)> {
+        match id {
+            (Some(i), Some(j)) => Some((i, j)),
+            (Some(i), None) => {
+                if !end {
+                    Some((i, 0))
+                } else {
+                    Some((i, u64::MAX))
+                }
+            },
+            _ => None
+        }
+    }
+
+    fn cmd_xrange(
+        &mut self,
+        key: String,
+        start: (Option<u64>, Option<u64>),
+        end: (Option<u64>, Option<u64>)) -> Option<String> {
+        match self.data.get(&key) {
+            Some(item) => {
+                match &item.value  {
+                    StoreValue::Stream(b) => {
+                        let start_id = Self::_extract_stream_id(start, false).unwrap();
+                        let end_id = Self::_extract_stream_id(end, true).unwrap();
+                        let mut kv_vec = Vec::new();
+                        for (k, v) in b.range(start_id..=end_id) {
+                            kv_vec.push((k, v.clone()));
+                        };
+                        
+                        // Prepare response
+                        let mut output = RespType::Array {
+                            length: kv_vec.len(), 
+                            value: Some(VecDeque::new())
+                        };
+
+                        for (k, mut v) in kv_vec {
+                            let key: String = format!("{}-{}", k.0, k.1);
+                            let k_type = RespType::BulkStr {
+                                length: key.len(),
+                                value: Some(key)
+                            };
+
+                            let mut v_type = RespType::Array {
+                                length: v.len(), value: Some(VecDeque::new())
+                            };
+
+                            v.drain(..).for_each(|s| {
+                                v_type.add_item(RespType::BulkStr {
+                                    length: s.len(), value: Some(s) });
+                            }); 
+                            
+                            let mut kv_arr = RespType::Array { length: 2, value: Some(VecDeque::new()) };
+                            kv_arr.add_item(k_type);
+                            kv_arr.add_item(v_type);
+                            output.add_item(kv_arr);
+                        };
+
+                        output.serialize()
+                    },
+                    _ => return RespType::Error(Some(
+                            CmdError::UnsupportedCommand(key).to_string())
+                        ).serialize(),
+                }
+            },
+            None => return RespType::Array {
+                    length: 0,
+                    value: Some(VecDeque::new())
+                }.serialize(),
+        }
+    }
 }
