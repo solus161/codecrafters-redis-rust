@@ -25,6 +25,10 @@ const KW_BLPOP: &str = "BLPOP";
 const KW_TYPE: &str = "TYPE";
 const KW_XADD: &str = "XADD";
 const KW_XRANGE: &str = "XRANGE";
+const KW_XREAD: &str = "XREAD";
+const KW_STREAMS: &str = "STREAMS";
+const KW_COUNT: &str = "COUNT";
+const KW_BLOCK: &str = "BLOCK";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -68,7 +72,8 @@ pub enum Cmd {
     BLPOP{ key: String, timeout_ms: Option<i64> },
     TYPE(String),
     XADD{ key: String, id: (Option<u64>, Option<u64>), value: Vec<String>},
-    XRANGE{ key: String, start: (u64, u64), end: (u64, u64)}
+    XRANGE{ key: String, start: (u64, u64), end: (u64, u64)},
+    XREAD{ count: Option<u64>, block_ms: Option<u64>, stream: Vec<(String, u64, u64)>, },
 }
 
 impl Cmd {
@@ -344,6 +349,100 @@ impl Cmd {
         Ok(Self::XRANGE { key, start, end })
     }
 
+    fn xread(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let mut count = None;
+        let mut stream: Vec<(String, u64, u64)> = Vec::new();
+        let mut block_ms: Option<u64> = None;
+       
+        let mut has_count = false;
+        let mut has_block = false;
+
+        let parse_u64_arg = |kw: &str, values: &mut VecDeque<RespType>|
+            -> Result<u64, CmdError> {
+            values.pop_front()
+                .ok_or(CmdError::MissingArgument("No argument provided for COUNT".to_string()))?
+                .get_value().unwrap().str().unwrap()
+                .parse::<u64>().map_err( |_|
+                    CmdError::ParseError(format!("value for {kw}"))
+                )
+        };
+        
+        // COUNT or BLOCK could come first
+        loop {
+            let first = values.pop_front()
+                .ok_or(CmdError::MissingArgument("No argument provided for XREAD".to_string()))?
+                .get_value().unwrap().str().unwrap().to_uppercase();
+            if first == KW_COUNT {
+                if has_count {
+                    return Err(
+                        CmdError::UnsupportedCmdStructure
+                    )
+                };
+
+                let second = parse_u64_arg("COUNT", &mut values)?;
+                count = Some(second);
+                has_count = true;
+            } else if first == KW_BLOCK {
+                if has_block {
+                    return Err(
+                        CmdError::UnsupportedCmdStructure
+                    )
+                };
+
+                let second = parse_u64_arg("BLOCK", &mut values)?;
+                block_ms = Some(second);
+                has_block = true;
+            } else if first != KW_STREAMS {
+                return Err(
+                    CmdError::UnsupportedCmdStructure
+                )
+            } else {
+                break;
+            };
+        };
+        
+        // Parse STREAMS key1 key2 .. id1 id2
+        if values.len() & 1 == 1 {
+            // Nbr of key id must be even
+            return Err(
+                CmdError::UnsupportedCmdStructure
+            )
+        };
+
+        let mut keys: VecDeque<String> = VecDeque::new();
+        let mut ids: VecDeque<(u64, u64)> = VecDeque::new();
+        let pair_len = values.len()/2;
+        
+        // let keys: VecDeque<String> = values.drain(..pair_len).collect();
+        // let mut keyskeys.extend(values.drain(..pair_len));
+        values.drain(..pair_len).for_each(|t| {
+            keys.push_back(
+                t.get_value().unwrap().str().unwrap()
+                )
+        });
+        
+        values.drain(..pair_len).try_for_each(|t| {
+            let (t, i) = Self::_parse_stream_id_xrange(
+                t.get_value().unwrap().str().unwrap(),
+                false)?;
+            ids.push_back((t, i));
+            Ok(())
+            } 
+        )?;
+        
+        // Pairing key and value
+        for _ in 0..pair_len {
+            let id = ids.pop_front().unwrap(); 
+            stream.push((
+                keys.pop_front().unwrap(),
+                id.0,
+                id.1
+            ));
+        };
+
+        Ok(Cmd::XREAD { count, block_ms, stream })
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -361,44 +460,47 @@ impl Cmd {
                                     if length == 0 { return Err(CmdError::NoCmdError) };
 
                                     match value.unwrap().to_uppercase() {
-                                        s if s == KW_PING.to_string() => {
+                                        s if s == KW_PING => {
                                             return Self::ping();
                                         },
-                                        s if s == KW_ECHO.to_string() => {
+                                        s if s == KW_ECHO => {
                                             return Self::echo(v);
                                         },
-                                        s if s == KW_SET.to_string() => {
+                                        s if s == KW_SET => {
                                             return Self::set(v);
                                         },
-                                        s if s == KW_GET.to_string() => {
+                                        s if s == KW_GET => {
                                             return Self::get(v);
                                         },
-                                        s if s == KW_RPUSH.to_string() => {
+                                        s if s == KW_RPUSH => {
                                             return Self::rpush(v);
                                         },
-                                        s if s == KW_LRANGE.to_string() => {
+                                        s if s == KW_LRANGE => {
                                             return Self::lrange(v);
                                         },
-                                        s if s == KW_LPUSH.to_string() => {
+                                        s if s == KW_LPUSH => {
                                             return Self::lpush(v);
                                         },
-                                        s if s == KW_LLEN.to_string() => {
+                                        s if s == KW_LLEN => {
                                             return Self::llen(v);
                                         },
-                                        s if s == KW_LPOP.to_string() => {
+                                        s if s == KW_LPOP => {
                                             return Self::lpop(v);
                                         },
-                                        s if s == KW_BLPOP.to_string() => {
+                                        s if s == KW_BLPOP => {
                                             return Self::blpop(v)
                                         },
-                                        s if s == KW_TYPE.to_string() => {
+                                        s if s == KW_TYPE => {
                                             return Self::ktype(v)
                                         },
-                                        s if s == KW_XADD.to_string() => {
+                                        s if s == KW_XADD => {
                                             return Self::xadd(v)
                                         },
-                                        s if s == KW_XRANGE.to_string() => {
+                                        s if s == KW_XRANGE => {
                                             return Self::xrange(v)
+                                        },
+                                        s if s == KW_XREAD => {
+                                            return Self::xread(v)
                                         },
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))

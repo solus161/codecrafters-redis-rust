@@ -1,6 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, btree_map};
 use std::collections::{HashMap, VecDeque, hash_map::Entry };
-use std::ops::Bound::Included;
+use std::iter;
+use std::ops::Bound::{Included, Excluded, Unbounded};
 use std::string::ParseError;
 
 use libc::{key_t, write};
@@ -42,23 +43,53 @@ impl StoreValue {
 #[derive(Debug)]
 struct StoreItem { value: StoreValue, expired_at: Option<u64> }
 
-type Task = Box<dyn FnOnce(&mut CmdHandler) -> Option<String>>;
+type Task = Box<dyn FnOnce(&mut CmdHandler)>;
 
 //---------Request registry: manage waiting request for CmdHandler
-struct RequestEntry {
-    pub client_id: u64,
-    pub key: String,
-    pub deadline: u64,
-    pub backlog_task: Task,     // Task run when request fullfilled
-    pub deadline_task: Task,    // Task run at deadline
+//---------Storing context of a request
+// struct RequestEntry {
+//     pub client_id: u64,
+//     pub key: String,
+//     pub deadline: u64,
+//     pub backlog_task: Task,     // Task run when request fullfilled
+//     pub deadline_task: Task,    // Task run at deadline
+// }
+
+enum RequestEntry {
+    List {
+        client_id: u64, key: String, deadline: u64,
+        backlog_task: Task, deadline_task: Task, },
+    Stream {
+        client_id: u64, keys: Vec<String>, deadline: u64,
+        backlog_task: Task, deadline_task: Task,
+    }
+}
+
+impl RequestEntry {
+    pub fn set_deadline(&mut self, d: u64){
+        match self {
+            Self::List { deadline, .. } => {
+                *deadline = d
+            },
+            Self::Stream { deadline, .. } => {
+                *deadline = d
+            },
+        }
+    }
 }
 
 struct RequestRegistry {
-    // timestamp - request
+    // timestamp - request, each request has an unique timestamp id
     store: HashMap<u64, RequestEntry>,
     
-    // key - queue of timestamp
-    backlog: HashMap<String, VecDeque<u64>>,
+    // waiting queue for list
+    // list name - queue of client (timestmap id)
+    backlog_list: HashMap<String, VecDeque<u64>>,
+
+    // Set of client waiting for stream
+    // This is not FIFO, but scan through all waiting clients
+    // as XREAD is fanning-out, not consuming
+    backlog_stream: HashSet<u64>,
 
     // deadline - timestamp
     deadline: BTreeMap<u64, u64>,
@@ -69,44 +100,64 @@ impl RequestRegistry {
     pub fn new(timer_fd: i32) -> Self {
         Self {
             store: HashMap::new(),
-            backlog: HashMap::new(),
+            backlog_list: HashMap::new(),
+            backlog_stream: HashSet::new(),
             deadline: BTreeMap::new(),
             timer_fd,
         }
     }
     
     pub fn insert(
-        &mut self, 
+        &mut self,
         timestamp: u64,
-        client_id: u64, 
-        key: String, 
         deadline: u64,
-        backlog_task: Task,
-        deadline_task: Task) {
-        self.backlog.entry(key.clone())
-            .or_insert_with(VecDeque::new).push_back(timestamp);
+        mut request_entry: RequestEntry) {
         if deadline > 0 {
-            self.deadline.insert(deadline, timestamp);
+            let mut d = deadline;
+            while self.deadline.contains_key(&d) {
+                d += 1
+            };
+            self.deadline.insert(d, timestamp);
+            request_entry.set_deadline(d);
             self.set_timer_fd();
         };
+
+        match request_entry {
+            RequestEntry::List { ref key, .. } => {
+                self.backlog_list.entry(key.clone())
+                    .or_insert_with(VecDeque::new).push_back(timestamp);
+            },
+            RequestEntry::Stream { .. } => {
+                self.backlog_stream.insert(timestamp);
+            }
+        }
             
-        self.store.insert(timestamp, RequestEntry {
-            client_id, key, deadline, backlog_task, deadline_task
-        });
+        self.store.insert(timestamp, request_entry);
     }
     
     pub fn remove(&mut self, timestamp: &u64) -> Option<RequestEntry> {
         let entry = self.store.remove(timestamp)?;
-        if let Some(q) = self.backlog.get_mut(&entry.key) {
-            // This will have no effect if backlog is pooped
-            // when a backlog condition fullfilled
-            q.retain(|&t| t!= *timestamp);
-            if q.is_empty() {
-                self.backlog.remove(&entry.key);
-                self.set_timer_fd();
-            }
+        
+        let deadline = match entry {
+            RequestEntry::List { ref key, deadline, .. } => {
+                if let Some(q) = self.backlog_list.get_mut(key) {
+                    // This will have no effect if backlog is pooped
+                    // when a backlog condition fullfilled
+                    q.retain(|&t| t!= *timestamp);
+                    if q.is_empty() {
+                        self.backlog_list.remove(key);
+                    };
+                };
+                deadline
+            },
+            RequestEntry::Stream { deadline, .. } => {
+                self.backlog_stream.remove(timestamp);
+                deadline
+            },
         };
-        self.deadline.remove(&entry.deadline);
+        
+        self.deadline.remove(&deadline);
+        self.set_timer_fd();
         Some(entry)
     }
 
@@ -128,8 +179,8 @@ impl RequestRegistry {
         }
     }
 
-    pub fn is_backlog_empty(&self, key: &str) -> bool {
-        match self.backlog.get(key) {
+    pub fn is_backlog_list_empty(&self, key: &str) -> bool {
+        match self.backlog_list.get(key) {
             Some(list) => {
                 list.is_empty()
             },
@@ -176,6 +227,7 @@ impl CmdHandler {
                     Cmd::TYPE(key) => self.cmd_type(key),
                     Cmd::XADD { key, id, value } => self.cmd_xadd(key, id, value),
                     Cmd::XRANGE { key, start, end } => self.cmd_xrange(key, start, end),
+                    Cmd::XREAD { count, block_ms, stream } => self.cmd_xread(count, block_ms, stream, client_id),
                 }
             },
             Err(e) => Self::cmd_err(e.to_string())
@@ -213,21 +265,30 @@ impl CmdHandler {
         // A callback fired when deadline expired (triggere by timer fd):
         // Execute callback in deadline_task
         let timestamp = *self.registry.get_nearest_deadline().unwrap().1;
-        let entry = self.registry.remove(&timestamp).unwrap();
-        (entry.deadline_task)(self);
+        match self.registry.remove(&timestamp) {
+            Some(entry) => match entry {
+                RequestEntry::List { deadline_task, .. } => {
+                    deadline_task(self);
+                },
+                RequestEntry::Stream { deadline_task, .. } => {
+                    deadline_task(self);
+                }
+            },
+            None => {},
+        };
     }
 
     fn response_ok() -> Option<String> {
         RespType::SimpleStr(Some("OK".to_string())).serialize()
     }
     
-    pub fn serve_queue(&mut self) {
+    pub fn serve_backlog_list(&mut self) {
         // Execute once at the end of main each event loop,
         // matching BLPOP queue with available item,
         // other LPOP requests are served at request time at client loop
         let mut timestamps: Vec<u64> = Vec::new();
 
-        for (k, v) in self.registry.backlog.iter() {
+        for (k, v) in self.registry.backlog_list.iter() {
             if let Some(item) = self.data.get(k) {
                 match &item.value {
                     StoreValue::List(list) => {
@@ -242,9 +303,67 @@ impl CmdHandler {
         let mut tasks: Vec<Task> = Vec::new();
         for t in &timestamps {
             if let Some(entry) = self.registry.remove(t) {
-                tasks.push(entry.backlog_task);
+                // Task may be fullfilled
+                match entry {
+                    RequestEntry::List { backlog_task, .. } => {
+                        tasks.push(backlog_task);
+                    },
+                    _ => {}
+                }
             }
+        };
+        
+        // Execute backlog task
+        for task in tasks {
+            task(self);
         }
+    }
+
+    pub fn serve_backlog_stream(&mut self) {
+        // Consecutively scanned for fullfilled stream
+        // in backlog_stream
+        let mut timestamps: Vec<u64> = Vec::new();
+        for t in self.registry.backlog_stream.iter() {
+            let mut has_items = false;
+            match self.registry.store.get(&t) {
+                Some(entry) => match entry {
+                    // Checking for streams having item
+                    RequestEntry::Stream { keys, .. } => {
+                        for key in keys {
+                            has_items = match self.data.get(key) {
+                                Some(item) => {
+                                    match item.value {
+                                        StoreValue::Stream(_) => true,
+                                        _ => false,
+                                    }
+                                },
+                                _ => false
+                            };
+                            if has_items { break }
+                        }
+                    },
+                    _ => {},
+                },
+                None => {}
+            };
+            
+            if has_items { timestamps.push(*t) };
+        };
+        
+        let mut tasks: Vec<Task> = Vec::new();
+        for t in &timestamps {
+            if let Some(entry) = self.registry.remove(t) {
+                // Task may be fullfilled
+                match entry {
+                    RequestEntry::Stream { backlog_task, .. } => {
+                        tasks.push(backlog_task);
+                    },
+                    _ => {}
+                }
+            }
+        };
+        
+        // Execute backlog task
         for task in tasks {
             task(self);
         }
@@ -459,7 +578,7 @@ impl CmdHandler {
         client_id: u64) -> Option<String> 
     {
         let (timestamp, deadline) = Self::get_deadline(timeout_ms);
-        let key1 = key.clone();
+        let key_task = key.clone();
         println!("BLPOP at {}, key {}, timeout ms {:?}", deadline, &key, timeout_ms);
 
         // Task to run when item available to pop
@@ -468,7 +587,7 @@ impl CmdHandler {
             // Task triggered when item available
             println!("Running backlog task for BLPOP at {}", deadline);
             
-            let popped = handler.data.get_mut(&key)
+            let popped = handler.data.get_mut(&key_task)
                 .and_then(|item| match &mut item.value {
                     StoreValue::List(list) => {
                         list.pop_front()
@@ -480,7 +599,7 @@ impl CmdHandler {
             if let Some(item) = popped {
                 // Construct response
                 let mut output = RespType::Array { length: 2, value: None };
-                let resp_key = RespType::BulkStr { length: key.len(), value: Some(key) };
+                let resp_key = RespType::BulkStr { length: key_task.len(), value: Some(key_task) };
                 let resp_item = RespType::BulkStr { length: item.len(), value: Some(item) };
                 output.add_item(resp_key);
                 output.add_item(resp_item);
@@ -490,7 +609,6 @@ impl CmdHandler {
                 // Disable deadline
                 handler.registry.remove(&timestamp);
             };
-            None
         });
 
         let deadline_task = Box::new(move |handler: &mut CmdHandler| {
@@ -500,10 +618,9 @@ impl CmdHandler {
                 "Push to response queue: {:?}", 
                 &handler.response_queue.last().unwrap());
             handler.registry.remove(&timestamp);
-            None
         });
  
-        match self.data.get_mut(&key1) {
+        match self.data.get_mut(&key) {
             // Key exists
             Some(item) => {
                 match &mut item.value {
@@ -512,11 +629,11 @@ impl CmdHandler {
                         // as being created by rpush and lpush
                         // let backlog = self.backlog.get_mut(&key1).unwrap();
                         // if backlog.is_empty() && !list.is_empty() {
-                        if self.registry.is_backlog_empty(&key1) && !list.is_empty() {
+                        if self.registry.is_backlog_list_empty(&key) && !list.is_empty() {
                             // No other client in waiting list and item available, pop
                             let item = list.pop_front().unwrap();
                             let mut output = RespType::Array{ length: 2, value: None};
-                            let list_name = RespType::BulkStr { length: key1.len(), value: Some(key1) };
+                            let list_name = RespType::BulkStr { length: key.len(), value: Some(key) };
                             let value = RespType::BulkStr { length: item.len(), value: Some(item) };
                             output.add_item(list_name);
                             output.add_item(value);
@@ -524,12 +641,13 @@ impl CmdHandler {
                         } else {
                             // Wait
                             self.registry.insert(
-                                timestamp, client_id, key1, deadline, backlog_task, deadline_task);
+                                timestamp, deadline, 
+                                RequestEntry::List { client_id, key, deadline, backlog_task, deadline_task });
                             None
                         }
                     },
                     _ => RespType::Error(
-                        Some(CmdError::UnsupportedCommand(key1).to_string())
+                        Some(CmdError::UnsupportedCommand(key).to_string())
                     ).serialize()
                 }
             },
@@ -537,7 +655,8 @@ impl CmdHandler {
                 // No key-list exists, also no key-backlog exists
                 // wait in queue for client
                 self.registry.insert(
-                    timestamp, client_id, key1, deadline, backlog_task, deadline_task);
+                    timestamp, deadline,
+                    RequestEntry::List { client_id, key, deadline, backlog_task, deadline_task });
                 None
             }
         }
@@ -661,6 +780,35 @@ impl CmdHandler {
         }
     }
 
+    fn _get_resp_stream_entity(kv: &Vec<((u64, u64), Vec<String>)>) -> Vec<RespType> {
+        // Construct RespType for an stream entity
+        // E.g.:: 0-1 apple banana
+        let mut output: Vec<RespType> = Vec::new(); 
+
+        for (k, v) in kv {
+            let key: String = format!("{}-{}", k.0, k.1);
+            let k_type = RespType::BulkStr {
+                length: key.len(),
+                value: Some(key)
+            };
+
+            let mut v_type = RespType::Array {
+                length: v.len(), value: Some(VecDeque::new())
+            };
+
+            v.iter().for_each(|s| {
+                v_type.add_item(RespType::BulkStr {
+                    length: s.len(), value: Some(s.to_string()) });
+            }); 
+            
+            let mut kv_arr = RespType::Array { length: 2, value: Some(VecDeque::new()) };
+            kv_arr.add_item(k_type);
+            kv_arr.add_item(v_type);
+            output.push(kv_arr);
+        };
+        output
+    }
+
     fn cmd_xrange(
         &mut self,
         key: String,
@@ -672,7 +820,7 @@ impl CmdHandler {
                     StoreValue::Stream(b) => {
                         let mut kv_vec = Vec::new();
                         for (k, v) in b.range(start..=end) {
-                            kv_vec.push((k, v.clone()));
+                            kv_vec.push((k.clone(), v.clone()));
                         };
                         
                         // Prepare response
@@ -680,28 +828,9 @@ impl CmdHandler {
                             length: kv_vec.len(), 
                             value: Some(VecDeque::new())
                         };
-
-                        for (k, mut v) in kv_vec {
-                            let key: String = format!("{}-{}", k.0, k.1);
-                            let k_type = RespType::BulkStr {
-                                length: key.len(),
-                                value: Some(key)
-                            };
-
-                            let mut v_type = RespType::Array {
-                                length: v.len(), value: Some(VecDeque::new())
-                            };
-
-                            v.drain(..).for_each(|s| {
-                                v_type.add_item(RespType::BulkStr {
-                                    length: s.len(), value: Some(s) });
-                            }); 
-                            
-                            let mut kv_arr = RespType::Array { length: 2, value: Some(VecDeque::new()) };
-                            kv_arr.add_item(k_type);
-                            kv_arr.add_item(v_type);
-                            output.add_item(kv_arr);
-                        };
+                        
+                        let mut kv_arr = Self::_get_resp_stream_entity(&kv_vec);
+                        kv_arr.drain(..).for_each(|t| output.add_item(t));
 
                         output.serialize()
                     },
@@ -715,5 +844,175 @@ impl CmdHandler {
                     value: Some(VecDeque::new())
                 }.serialize(),
         }
+    }
+
+    fn _extract_stream_entries(
+        &self, 
+        key: &str,
+        count: u64, timestamp: u64, seq: u64) -> Option<Box<RespType>>{
+        /*
+        Extract from a stream btree given key name
+
+        Params:
+        - count: nbr of entities needed to be read
+        - timestamp: timestamp part of stream id to read onwards
+        - seq: sequence part of stream id to read onwards
+        
+        Return:
+        - RespType Array, 3 nested level key - id - entities
+        */ 
+        let mut entries = match self.data.get(key) {
+            Some(item) => match &item.value {
+                StoreValue::Stream(b) => {
+                    b.range((Excluded((timestamp, seq)), Unbounded)) 
+                        .take(count as usize)
+                        .map(|(k, v)| (*k, v.clone()))
+                        .collect()
+                },
+                _ => { 
+                    Vec::new()
+                },
+            },
+            None => {
+                return None 
+            } 
+        };
+        
+        if entries.is_empty() { return None };
+        
+        // Construct return RespType
+        // Blank array, not null array
+        let mut arr_entries = RespType::Array {
+            length: entries.len(),
+            value: Some(VecDeque::new()) };
+        for ((ts, sq), mut v) in entries.drain(..) {
+            let mut arr_entry = RespType::Array { length: 2, value: None };
+            let msg = format!("{ts}-{sq}");
+            let stream_id = RespType::BulkStr { length: msg.len(), value: Some(msg) }; 
+            let mut stream_content = RespType::Array { length: v.len(), value: None };
+            v.drain(..).for_each(|s| {
+                stream_content.add_item(
+                    RespType::BulkStr { length: s.len(), value: Some(s) }
+                );
+            });
+
+            arr_entry.add_item(stream_id);
+            arr_entry.add_item(stream_content);
+            arr_entries.add_item(arr_entry);
+        };
+        Some(Box::new(arr_entries))
+    }
+
+    fn cmd_xread(
+        &mut self,
+        count: Option<u64>,
+        block: Option<u64>,
+        stream: Vec<(String, u64, u64)>,
+        client_id: u64) -> Option<String> {
+        // Check valid type first
+        for (key, _, _) in &stream{
+            match self.data.get(key) {
+                Some(item) => match &item.value {
+                    StoreValue::Stream(_) => {/* Do nothing */},
+                    _ => return RespType::Error(Some(
+                            CmdError::UnsupportedCommand(key.clone()).to_string())
+                        ).serialize()
+                },
+                None => { /* Do nothing */ }
+            }
+        };
+        
+        // Immediate serving if possible
+        // Extract resp entries from stream
+        let mut stream_vec: Vec<(String, RespType)> = Vec::new();
+        for (key, start_ts, seq) in &stream {
+            match self._extract_stream_entries(&key, count.unwrap_or(u64::MAX), *start_ts, *seq) {
+                Some(b) => { stream_vec.push((key.clone(), *b)); },
+                None => {/* Skip this, no return */}
+            };
+        };
+        
+        // If non blocking, return nil if no entities retrieved
+        if stream_vec.is_empty() {
+            match block {
+                Some(t_ms) => {
+                    // Put to wait queue 
+                    let (timestamp, deadline) = Self::get_deadline(Some(t_ms as i64));
+                    
+                    // This will run if conditions meet
+                    let mut keys: Vec<String> = Vec::new();
+                    for (key, _, _) in &stream {
+                        keys.push(key.clone());
+                    }
+
+
+                    let backlog_task = Box::new(move |handler: &mut CmdHandler| {
+                        let mut stream_vec: Vec<(String, RespType)> = Vec::new();
+                        for (key, start_ts, seq) in stream {
+                            match handler._extract_stream_entries(
+                                &key, count.unwrap_or(u64::MAX), start_ts, seq
+                                ) {
+                                Some(b) => {
+                                    stream_vec.push((key, *b));
+                                },
+                                None => {/* Skip this, no return */}
+                                };
+                        };
+
+                        if stream_vec.is_empty() {
+                           handler.response_queue.push((
+                                   client_id,
+                                   RespType::Array { length: 0, value: None }.serialize().unwrap()));
+                        } else {
+                            let mut arr_stream = RespType::Array {
+                                length: stream_vec.len(), value: None };
+                            for (key, entries) in stream_vec.drain(..) {
+                                let mut pair = RespType::Array { length: 2, value: None };
+                                pair.add_item(RespType::BulkStr { length: key.len(), value: Some(key) });
+                                pair.add_item(entries);
+                                arr_stream.add_item(pair);
+                            };
+                            handler.response_queue.push((client_id, arr_stream.serialize().unwrap()));
+                            handler.registry.remove(&timestamp);
+                        }
+                    });
+
+                    let deadline_task = Box::new(move |handler: &mut CmdHandler| {
+                        let msg = Self::get_null_array().unwrap();
+                        handler.response_queue.push((client_id, msg));
+                        println!(
+                            "Push to response queue: {:?}", 
+                            &handler.response_queue.last().unwrap());
+                        handler.registry.remove(&timestamp);
+                    });
+
+                    self.registry.insert(
+                        timestamp, deadline,
+                        RequestEntry::Stream { client_id, keys, deadline, backlog_task, deadline_task }
+                    );
+                },   
+                None => {
+                    // Return blank array
+                    return RespType::Array {
+                        length: 0,
+                        value: Some(VecDeque::new())
+                    }.serialize()
+                }
+            }
+        } else {
+            // Construct resp response: *N [*2 [key, entries], ...]
+            let mut arr_stream = RespType::Array {
+                length: stream_vec.len(), value: None };
+            for (key, entries) in stream_vec.drain(..) {
+                let mut pair = RespType::Array { length: 2, value: None };
+                pair.add_item(RespType::BulkStr { length: key.len(), value: Some(key) });
+                pair.add_item(entries);
+                arr_stream.add_item(pair);
+            };
+            return arr_stream.serialize()
+        }
+
+        // Put to backlog if not fullfilled
+        None
     }
 }

@@ -154,7 +154,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // A -> RPUSH key "a" at t1
         // end cycle, A and B must be matched, 
         // not waiting till next cycle
-        cmd_handler.borrow_mut().serve_queue(); 
+        cmd_handler.borrow_mut().serve_backlog_list(); 
+        cmd_handler.borrow_mut().serve_backlog_stream();
 
         // BLPOP responses gathered, now flush
         for res in cmd_handler.borrow_mut().response_queue.drain(..) { 
