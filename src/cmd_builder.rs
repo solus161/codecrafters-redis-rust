@@ -6,6 +6,7 @@ use std::u64;
 
 use crate::resp::{ RespType, RespValue };
 use crate::epoll::timer_create_event;
+use crate::utils::now;
 
 
 // Command Keyword
@@ -159,7 +160,7 @@ impl Cmd {
             .get_value().unwrap().str().unwrap()
             .parse().map_err(
                 |_| CmdError::InvalidArgument(
-                    "start index for LRANGE".to_string()))?;
+                    "Error while parsing start index for LRANGE".to_string()))?;
         let stop: i64 = values.pop_front()
             .ok_or(
                 CmdError::MissingArgument(
@@ -167,7 +168,7 @@ impl Cmd {
             .get_value().unwrap().str().unwrap()
             .parse().map_err(
                 |_| CmdError::InvalidArgument(
-                    "end index for LRANGE".to_string()))?;
+                    "Error while parsing end index for LRANGE".to_string()))?;
         Ok(Self::LRANGE { key, start, stop })
     }
     
@@ -206,7 +207,7 @@ impl Cmd {
                     .parse::<usize>() {
                     Ok(x) => Some(x),
                     Err(_) => return
-                        Err(CmdError::InvalidArgument("length for LPOP".to_string()))
+                        Err(CmdError::InvalidArgument("Error while parsing length for LPOP".to_string()))
                     }
             },
             None => None
@@ -229,7 +230,7 @@ impl Cmd {
             ).map(|x| (x * 1000.0) as i64)?;
         
         if timeout_ms < 0 {
-            Err(CmdError::InvalidArgument("expiration".to_string()))
+            Err(CmdError::InvalidArgument("Error while parsing expiration for BLPOP".to_string()))
         } else if timeout_ms == 0 {
             Ok(Self::BLPOP { key, timeout_ms: None })
         } else {
@@ -249,24 +250,25 @@ impl Cmd {
         let id: (Option<u64>, Option<u64>);
         if value == "*".to_string() {
             id = (None, None);
+        
         } else {
             let vec_splitted: Vec<&str> = value.split('-').collect();
             match vec_splitted.as_slice() {
                 [t, i] => {
                     let ts: Option<u64> = Some(t.parse::<u64>().map_err(
-                        |_| CmdError::InvalidArgument("id for XADD".to_string())
+                        |_| CmdError::InvalidArgument("Error while parsing stream id for XADD".to_string())
                     )?);
 
                     if *i == "*".to_string() {
                         id = (ts, None);  
                     } else {
                         let idx: Option<u64> = Some(i.parse::<u64>().map_err(
-                            |_| CmdError::InvalidArgument("id for XADD".to_string())
+                            |_| CmdError::InvalidArgument("Error while parsing stream id for XADD".to_string())
                         )?);
                         id = (ts, idx)
                     }
                 },
-                _ => return Err(CmdError::InvalidArgument("id for XADD".to_string()))
+                _ => return Err(CmdError::InvalidArgument("Error while parsing stream id for XADD".to_string()))
             };
         };
         Ok(id)
@@ -288,33 +290,24 @@ impl Cmd {
         };
         Ok(Self::XADD { key, id, value })
     }
-    
-    fn _parse_stream_id_xrange(value: String, end: bool) -> Result<(u64, u64), CmdError> {
-        // Parse timestamp id of stream
-        if value == "-".to_string() {
-            return Ok((0, 0))
-        };
-        
-        if value == "+".to_string() {
-            return Ok((u64::MAX, u64::MAX))
-        };
 
+    fn _parse_stream_id(value: String, end: bool) -> Result<(u64, u64), CmdError> {
         let vec_splitted: Vec<&str> = value.split('-').collect();
         let id = match vec_splitted.as_slice() {
             [t, i] => {
                 let ts: u64 = t.parse::<u64>().map_err(
-                    |_| CmdError::InvalidArgument("id for XRANGE".to_string())
+                    |_| CmdError::InvalidArgument("Error while parsing stream id".to_string())
                 )?;
 
                 let idx: u64 = i.parse::<u64>().map_err(
-                    |_| CmdError::InvalidArgument("id for XRANGE".to_string())
+                    |_| CmdError::InvalidArgument("Error while parsing stream id".to_string())
                 )?;
 
                 (ts, idx)
             },
             [t] => {
                 let ts: u64 = t.parse::<u64>().map_err(
-                    |_| CmdError::InvalidArgument("id for XRANGE".to_string())
+                    |_| CmdError::InvalidArgument("Error while parsing stream id".to_string())
                 )?;
                 
                 if !end {
@@ -324,9 +317,29 @@ impl Cmd {
                 }
                 
             }
-            _ => return Err(CmdError::InvalidArgument("id for XADD".to_string()))
+            _ => return Err(CmdError::InvalidArgument("Error while parsing stream id".to_string()))
         };
         Ok(id)
+    }
+    
+    fn _parse_stream_id_xrange(value: String, end: bool) -> Result<(u64, u64), CmdError> {
+        // Parse timestamp id of stream
+        if value == "-" {
+            return Ok((0, 0))
+        };
+        
+        if value == "+" {
+            return Ok((u64::MAX, u64::MAX))
+        };
+        
+        Self::_parse_stream_id(value, end)
+    }
+
+    fn _parse_stream_id_xread(value: String) -> Result<(u64, u64), CmdError> {
+        if value == "$" {
+            return Ok((u64::MAX, u64::MAX));
+        };
+        Self::_parse_stream_id(value, false)
     }
 
     fn xrange(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
@@ -422,13 +435,11 @@ impl Cmd {
         });
         
         values.drain(..pair_len).try_for_each(|t| {
-            let (t, i) = Self::_parse_stream_id_xrange(
-                t.get_value().unwrap().str().unwrap(),
-                false)?;
+            let (t, i) = Self::_parse_stream_id_xread(
+                t.get_value().unwrap().str().unwrap())?;
             ids.push_back((t, i));
             Ok(())
-            } 
-        )?;
+        })?;
         
         // Pairing key and value
         for _ in 0..pair_len {

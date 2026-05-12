@@ -859,6 +859,7 @@ impl CmdHandler {
         Return:
         - RespType Array, 3 nested level key - id - entities
         */ 
+
         let mut entries = match self.data.get(key) {
             Some(item) => match &item.value {
                 StoreValue::Stream(b) => {
@@ -937,7 +938,22 @@ impl CmdHandler {
                 None => { /* Do nothing */ }
             }
         };
-        
+
+        // Resolve $ sentinel (u64::MAX, u64::MAX) to the current last entry ID per stream
+        let stream: Vec<(String, u64, u64)> = stream.into_iter().map(|(key, ts, seq)| {
+            if ts == u64::MAX && seq == u64::MAX {
+                let (rts, rseq) = self.data.get(&key)
+                    .and_then(|item| match &item.value {
+                        StoreValue::Stream(b) => b.keys().next_back().copied(),
+                        _ => None,
+                    })
+                    .unwrap_or((0, 0));
+                (key, rts, rseq)
+            } else {
+                (key, ts, seq)
+            }
+        }).collect();
+
         // Immediate serving if possible
         // Extract resp entries from stream
         // key, resp
