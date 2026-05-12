@@ -960,14 +960,15 @@ impl CmdHandler {
             match block {
                 Some(t_ms) => {
                     // Put to wait queue 
-                    let (timestamp, deadline) = Self::get_deadline(Some(t_ms as i64));
+                    // BLOCK 0 means wait indefinitely — pass None so no deadline timer is armed
+                    let timeout_arg = if t_ms == 0 { None } else { Some(t_ms as i64) };
+                    let (timestamp, deadline) = Self::get_deadline(timeout_arg);
                     
                     // This will run if conditions meet
                     let mut keys: Vec<String> = Vec::new();
                     for (key, _, _) in &stream {
                         keys.push(key.clone());
                     }
-
 
                     let backlog_task = Box::new(move |handler: &mut CmdHandler| {
                         let mut stream_vec: Vec<(String, RespType)> = Vec::new();
