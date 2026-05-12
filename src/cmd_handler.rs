@@ -60,8 +60,8 @@ enum RequestEntry {
         client_id: u64, key: String, deadline: u64,
         backlog_task: Task, deadline_task: Task, },
     Stream {
-        client_id: u64, keys: Vec<String>, deadline: u64,
-        backlog_task: Task, deadline_task: Task,
+        client_id: u64, key_ts: Vec<(String, u64, u64)>, // key, ts, seq
+        deadline: u64, backlog_task: Task, deadline_task: Task,
     }
 }
 
@@ -324,22 +324,17 @@ impl CmdHandler {
         // in backlog_stream
         let mut timestamps: Vec<u64> = Vec::new();
         for t in self.registry.backlog_stream.iter() {
+            println!("Timestamp {} in backlog_stream", &t);
             let mut has_items = false;
             match self.registry.store.get(&t) {
                 Some(entry) => match entry {
                     // Checking for streams having item
-                    RequestEntry::Stream { keys, .. } => {
-                        for key in keys {
-                            has_items = match self.data.get(key) {
-                                Some(item) => {
-                                    match item.value {
-                                        StoreValue::Stream(_) => true,
-                                        _ => false,
-                                    }
-                                },
-                                _ => false
-                            };
-                            if has_items { break }
+                    RequestEntry::Stream { key_ts, .. }   => {
+                        for (key, ts, seq) in key_ts {
+                            if self._is_stream_avail(key, *ts, *seq) {
+                                has_items = true;
+                                break
+                            } 
                         }
                     },
                     _ => {},
@@ -347,7 +342,9 @@ impl CmdHandler {
                 None => {}
             };
             
-            if has_items { timestamps.push(*t) };
+            if has_items { 
+                println!("Having item for timestamp {}", t);
+                timestamps.push(*t) };
         };
         
         let mut tasks: Vec<Task> = Vec::new();
@@ -357,6 +354,7 @@ impl CmdHandler {
                 match entry {
                     RequestEntry::Stream { backlog_task, .. } => {
                         tasks.push(backlog_task);
+                        println!("Pop out backlog task for timestamp {}", t);
                     },
                     _ => {}
                 }
@@ -903,6 +901,24 @@ impl CmdHandler {
         Some(Box::new(arr_entries))
     }
 
+    fn _is_stream_avail(&self, key: &str, start_ts: u64, seq: u64) -> bool {
+        // To check for available item in stream key
+        match self.data.get(key) {
+            Some(item) => match &item.value {
+                StoreValue::Stream(b) => {
+                    b.range((Excluded((start_ts, seq)), Unbounded)) 
+                        .next().is_some()
+                },
+                _ => { 
+                    false 
+                },
+            },
+            None => {
+                false 
+            } 
+        }
+    }
+
     fn cmd_xread(
         &mut self,
         count: Option<u64>,
@@ -924,12 +940,19 @@ impl CmdHandler {
         
         // Immediate serving if possible
         // Extract resp entries from stream
+        // key, resp
         let mut stream_vec: Vec<(String, RespType)> = Vec::new();
+
+        // key, start timestamp, seq
+        let mut key_ts: Vec<(String, u64, u64)> = Vec::new();
         for (key, start_ts, seq) in &stream {
             match self._extract_stream_entries(&key, count.unwrap_or(u64::MAX), *start_ts, *seq) {
-                Some(b) => { stream_vec.push((key.clone(), *b)); },
+                Some(b) => { 
+                    stream_vec.push((key.clone(), *b)); 
+                },
                 None => {/* Skip this, no return */}
             };
+            key_ts.push((key.clone(), *start_ts, *seq));
         };
         
         // If non blocking, return nil if no entities retrieved
@@ -949,13 +972,16 @@ impl CmdHandler {
                     let backlog_task = Box::new(move |handler: &mut CmdHandler| {
                         let mut stream_vec: Vec<(String, RespType)> = Vec::new();
                         for (key, start_ts, seq) in stream {
+                            println!("Checking stream name {}", &key);
                             match handler._extract_stream_entries(
                                 &key, count.unwrap_or(u64::MAX), start_ts, seq
                                 ) {
                                 Some(b) => {
                                     stream_vec.push((key, *b));
                                 },
-                                None => {/* Skip this, no return */}
+                                None => {/* Skip this, no return */
+                                    println!("No available item for stream {}", &key);
+                                }
                                 };
                         };
 
@@ -988,7 +1014,7 @@ impl CmdHandler {
 
                     self.registry.insert(
                         timestamp, deadline,
-                        RequestEntry::Stream { client_id, keys, deadline, backlog_task, deadline_task }
+                        RequestEntry::Stream { client_id, key_ts, deadline, backlog_task, deadline_task }
                     );
                 },   
                 None => {
