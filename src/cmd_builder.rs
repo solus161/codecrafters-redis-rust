@@ -30,6 +30,7 @@ const KW_XREAD: &str = "XREAD";
 const KW_STREAMS: &str = "STREAMS";
 const KW_COUNT: &str = "COUNT";
 const KW_BLOCK: &str = "BLOCK";
+const KW_INCR: &str = "INCR";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -41,6 +42,7 @@ pub enum CmdError {
     ParseIntError(String),
     UnsupportedCmdStructure,
     UnsupportedCommand(String),
+    UnprocessableError(String),
 }
 
 impl std::fmt::Display for CmdError {
@@ -53,6 +55,7 @@ impl std::fmt::Display for CmdError {
             Self::ParseIntError(msg) => write!(f, "Error parsing int value {}", msg),
             Self::UnsupportedCmdStructure => write!(f, "Unsupported command structure"),
             Self::UnsupportedCommand(msg) => write!(f, "Key {} does not support this command", msg),
+            Self::UnprocessableError(msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -75,6 +78,7 @@ pub enum Cmd {
     XADD{ key: String, id: (Option<u64>, Option<u64>), value: Vec<String>},
     XRANGE{ key: String, start: (u64, u64), end: (u64, u64)},
     XREAD{ count: Option<u64>, block_ms: Option<u64>, stream: Vec<(String, u64, u64)>, },
+    INCR(String),
 }
 
 impl Cmd {
@@ -453,6 +457,13 @@ impl Cmd {
 
         Ok(Cmd::XREAD { count, block_ms, stream })
     }
+    
+    pub fn incr(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let key: String = values.pop_front()
+           .ok_or(CmdError::MissingArgument("No key provided for INCR".to_string()))?
+           .get_value().unwrap().str().unwrap();
+        Ok(Cmd::INCR(key))
+    }
 
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
@@ -512,6 +523,9 @@ impl Cmd {
                                         },
                                         s if s == KW_XREAD => {
                                             return Self::xread(v)
+                                        },
+                                        s if s == KW_INCR => {
+                                            return Self::incr(v)
                                         },
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))

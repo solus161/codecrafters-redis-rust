@@ -227,7 +227,9 @@ impl CmdHandler {
                     Cmd::TYPE(key) => self.cmd_type(key),
                     Cmd::XADD { key, id, value } => self.cmd_xadd(key, id, value),
                     Cmd::XRANGE { key, start, end } => self.cmd_xrange(key, start, end),
-                    Cmd::XREAD { count, block_ms, stream } => self.cmd_xread(count, block_ms, stream, client_id),
+                    Cmd::XREAD { count, block_ms, stream } => 
+                        self.cmd_xread(count, block_ms, stream, client_id),
+                    Cmd::INCR(key) => self.cmd_incr(key),
                 }
             },
             Err(e) => Self::cmd_err(e.to_string())
@@ -1057,5 +1059,52 @@ impl CmdHandler {
 
         // Put to backlog if not fullfilled
         None
+    }
+
+    fn cmd_incr(&mut self, key: String) -> Option<String> { 
+        let item = self.data.entry(key.clone()).or_insert(
+            StoreItem {
+                value: StoreValue::Str("1".to_string()),
+                expired_at: None,
+            }
+        );
+
+        match &mut item.value {
+            StoreValue::Str(s) => {
+                // Try to convert to i64 first 
+                match s.parse::<i64>() {
+                    Ok(i) => {
+                        if i < i64::MAX {
+                            *s = i64::to_string(&(i + 1));
+                            Some(
+                                RespType::Integer(Some(i + 1))
+                                .serialize().unwrap())
+                        } else {
+                            Some(
+                                RespType::Error(
+                                    Some(CmdError::UnprocessableError(
+                                        "Intever overflow".to_string()
+                                    ).to_string())
+                                ).serialize().unwrap())}},
+                    Err(_) => Some(
+                        RespType::Error(
+                            Some(
+                                CmdError::ParseError(format!("{} to i64", &s))
+                                .to_string())
+                            ).serialize().unwrap()),
+                }
+            },
+            _ => {
+                Some(
+                    RespType::Error(
+                        Some(
+                            CmdError::InvalidArgument(
+                                format!("Not applicable to key {}", &key))
+                            .to_string())
+                    ).serialize().unwrap()
+                )
+            }
+        }
+        
     }
 }
