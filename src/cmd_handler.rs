@@ -1064,7 +1064,7 @@ impl CmdHandler {
     fn cmd_incr(&mut self, key: String) -> Option<String> { 
         let item = self.data.entry(key.clone()).or_insert(
             StoreItem {
-                value: StoreValue::Str("1".to_string()),
+                value: StoreValue::Str("0".to_string()),
                 expired_at: None,
             }
         );
