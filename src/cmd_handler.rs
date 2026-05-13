@@ -1089,8 +1089,8 @@ impl CmdHandler {
                     Err(_) => Some(
                         RespType::Error(
                             Some(
-                                CmdError::ParseError(format!("{} to i64", &s))
-                                .to_string())
+                                "ERR value is not an integer or out of range".to_string()
+                                ) 
                             ).serialize().unwrap()),
                 }
             },
@@ -1098,9 +1098,8 @@ impl CmdHandler {
                 Some(
                     RespType::Error(
                         Some(
-                            CmdError::InvalidArgument(
-                                format!("Not applicable to key {}", &key))
-                            .to_string())
+                            "ERR value is not an integer or out of range".to_string()
+                            )
                     ).serialize().unwrap()
                 )
             }
