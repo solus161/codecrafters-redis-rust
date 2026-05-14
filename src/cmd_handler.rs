@@ -8,7 +8,7 @@ use libc::{key_t, write};
 
 use crate::resp::{ RespType, RespValue };
 use crate::epoll::timer_create_event;
-use crate::cmd_builder::{ Cmd, CmdError, CmdOption, KW_PONG };
+use crate::cmd_builder::{ Cmd, CmdError, CmdOption, KW_PONG, KW_QUEUED };
 use crate::utils::now;
 
 // Stored value types for CmdHandler
@@ -91,6 +91,9 @@ struct RequestRegistry {
     // as XREAD is fanning-out, not consuming
     backlog_stream: HashSet<u64>,
 
+    // Transaction
+    backlog_txn: HashMap<u64, VecDeque<Cmd>>,
+
     // deadline - timestamp
     deadline: BTreeMap<u64, u64>,
     timer_fd: i32,
@@ -102,6 +105,7 @@ impl RequestRegistry {
             store: HashMap::new(),
             backlog_list: HashMap::new(),
             backlog_stream: HashSet::new(),
+            backlog_txn: HashMap::new(),
             deadline: BTreeMap::new(),
             timer_fd,
         }
@@ -194,6 +198,28 @@ impl RequestRegistry {
 }
 
 //---------Command handler, convert Cmd struct into action
+enum CmdOutput {
+    Resp(RespType),
+    Str(String),
+    None,
+}
+
+impl CmdOutput{
+    pub fn extract_resp(self) -> Option<RespType> {
+        match self {
+            Self::Resp(r) => Some(r),
+            _ => None
+        }
+    }
+
+    pub fn extract_str(self) -> Option<String> {
+        match self {
+            Self::Str(s) => Some(s),
+            _ => None
+        }
+    }
+}
+
 pub struct CmdHandler {
     // client_id, message
     pub response_queue: Vec<(u64, String)>,
@@ -210,27 +236,51 @@ impl CmdHandler {
         }
     }
 
+    fn _execute_cmd(&mut self, cmd: Cmd, client_id: u64, serialized: bool) -> CmdOutput {
+        let output: Option<RespType> = match cmd {
+            Cmd::PING => Self::cmd_ping(),
+            Cmd::ECHO(s) => Self::cmd_echo(s),
+            Cmd::SET{ key, value, opt } => self.cmd_set(key, value, opt),
+            Cmd::GET{ key } => self.cmd_get(key),
+            Cmd::RPUSH{ key, value } => self.cmd_rpush(key, value),
+            Cmd::LRANGE { key, start, stop } => self.cmd_lrange(key, start, stop),
+            Cmd::LPUSH{ key, value } => self.cmd_lpush(key, value),
+            Cmd::LLEN(s) => self.cmd_llen(s),
+            Cmd::LPOP{ key, length } => self.cmd_lpop(key, length),
+            Cmd::BLPOP { key, timeout_ms } => self.cmd_blpop(key, timeout_ms, client_id),
+            Cmd::TYPE(key) => self.cmd_type(key),
+            Cmd::XADD { key, id, value } => self.cmd_xadd(key, id, value),
+            Cmd::XRANGE { key, start, end } => self.cmd_xrange(key, start, end),
+            Cmd::XREAD { count, block_ms, stream } => 
+                self.cmd_xread(count, block_ms, stream, client_id),
+            Cmd::INCR(key) => self.cmd_incr(key),
+            Cmd::MULTI => self.cmd_multi(client_id),
+            Cmd::EXEC => self.cmd_exec(client_id),
+        };
+        
+        if let Some(resp) = output {
+            if serialized {
+                CmdOutput::Str(resp.serialize().unwrap())
+            } else {
+                CmdOutput::Resp(resp)
+            }
+        } else {
+            CmdOutput::None
+        }
+    }
+
     pub fn handle(&mut self, cmd: Result<Cmd, CmdError>, client_id: u64) -> Option<String> {
         match cmd {
             Ok(c) => {
-                match c {
-                    Cmd::PING => Self::cmd_ping(),
-                    Cmd::ECHO(s) => Self::cmd_echo(s),
-                    Cmd::SET{ key, value, opt } => self.cmd_set(key, value, opt),
-                    Cmd::GET{ key } => self.cmd_get(key),
-                    Cmd::RPUSH{ key, value } => self.cmd_rpush(key, value),
-                    Cmd::LRANGE { key, start, stop } => self.cmd_lrange(key, start, stop),
-                    Cmd::LPUSH{ key, value } => self.cmd_lpush(key, value),
-                    Cmd::LLEN(s) => self.cmd_llen(s),
-                    Cmd::LPOP{ key, length } => self.cmd_lpop(key, length),
-                    Cmd::BLPOP { key, timeout_ms } => self.cmd_blpop(key, timeout_ms, client_id),
-                    Cmd::TYPE(key) => self.cmd_type(key),
-                    Cmd::XADD { key, id, value } => self.cmd_xadd(key, id, value),
-                    Cmd::XRANGE { key, start, end } => self.cmd_xrange(key, start, end),
-                    Cmd::XREAD { count, block_ms, stream } => 
-                        self.cmd_xread(count, block_ms, stream, client_id),
-                    Cmd::INCR(key) => self.cmd_incr(key),
+                if !self.registry.backlog_txn.contains_key(&client_id) {
+                    self._execute_cmd(c, client_id, true).extract_str() 
+                } else {
+                    // Building a transaction
+                    self.registry.backlog_txn.entry(client_id).or_insert_with(VecDeque::new)
+                        .push_back(c);
+                    RespType::SimpleStr(Some(KW_QUEUED.to_string())).serialize()
                 }
+                
             },
             Err(e) => Self::cmd_err(e.to_string())
         } 
@@ -280,8 +330,8 @@ impl CmdHandler {
         };
     }
 
-    fn response_ok() -> Option<String> {
-        RespType::SimpleStr(Some("OK".to_string())).serialize()
+    fn response_ok() -> Option<RespType> {
+        Some(RespType::SimpleStr(Some("OK".to_string())))
     }
     
     pub fn serve_backlog_list(&mut self) {
@@ -369,19 +419,19 @@ impl CmdHandler {
         }
     }
 
-    fn cmd_ping() -> Option<String> {
-        RespType::SimpleStr(Some(KW_PONG.to_string())).serialize()
+    fn cmd_ping() -> Option<RespType> {
+        Some(RespType::SimpleStr(Some(KW_PONG.to_string())))
     }
 
-    fn cmd_echo(s: String) -> Option<String> {
-        RespType::BulkStr{ length: s.len(), value: Some(s) }.serialize() 
+    fn cmd_echo(s: String) -> Option<RespType> {
+        Some(RespType::BulkStr{ length: s.len(), value: Some(s) })
     }
 
     fn cmd_err(s: String) -> Option<String> {
         RespType::SimpleStr(Some(s)).serialize()
     }
 
-    fn cmd_set(&mut self, key: String, value: String, opt: Option<CmdOption>) -> Option<String> {
+    fn cmd_set(&mut self, key: String, value: String, opt: Option<CmdOption>) -> Option<RespType> {
         // Extract cmd for handling instruction
         let exp = Self::extract_deadline(opt); 
         self.data.insert(key, StoreItem {
@@ -389,7 +439,7 @@ impl CmdHandler {
         Self::response_ok()
     }
 
-    fn cmd_get(&self, key: String) -> Option<String> {
+    fn cmd_get(&self, key: String) -> Option<RespType> {
         match self.data.get(&key) {
             Some(item) => match &item.value {
                 StoreValue::Str(s) => {
@@ -397,21 +447,21 @@ impl CmdHandler {
                     // TODO:: implement removed at expiration
                     let expired = item.expired_at.map_or(false, |x| now() > x);
                     let value = if expired { None } else { Some(s.clone()) };
-                    RespType::BulkStr{
+                    Some(RespType::BulkStr{
                         length: value.as_ref().map_or(0, |s| s.len()),
                         value: value
-                    }.serialize()
+                    })
                 },
-                _ => RespType::Error(
+                _ => Some(RespType::Error(
                     Some(CmdError::UnsupportedCommand(key).to_string()))
-                    .serialize()
+                    )
             },
             // No key found
-            None => RespType::BulkStr{ length: 0, value: None }.serialize(),
+            None => Some(RespType::BulkStr{ length: 0, value: None }),
         } 
     }
 
-    fn cmd_rpush(&mut self, key: String, value: Vec<String>) -> Option<String> {
+    fn cmd_rpush(&mut self, key: String, value: Vec<String>) -> Option<RespType> {
         let item = self.data.entry(key.clone()).or_insert(
             StoreItem {
                 value: StoreValue::List(VecDeque::new()),
@@ -420,15 +470,15 @@ impl CmdHandler {
         match &mut item.value {
             StoreValue::List(list) => {
                 list.extend(value);
-                RespType::Integer(Some(list.len() as i64)).serialize()
+                Some(RespType::Integer(Some(list.len() as i64)))
             },
-            _ =>  RespType::Error(
+            _ =>  Some(RespType::Error(
                 Some(CmdError::UnsupportedCommand(key).to_string())
-            ).serialize()
+            ))
         }
     }
 
-    fn cmd_lrange(&self, key: String, start: i64, stop: i64) -> Option<String> {
+    fn cmd_lrange(&self, key: String, start: i64, stop: i64) -> Option<RespType> {
         // Check valid key First
         match self.data.get(&key) {
             Some(item) => {
@@ -436,12 +486,12 @@ impl CmdHandler {
                     StoreValue::List(list) => {
                         // Edge case
                         if start > stop && start > 0 && stop > 0 {
-                            return RespType::Array{ length: 0, value: Some(VecDeque::new())}.serialize()
+                            return Some(RespType::Array{ length: 0, value: Some(VecDeque::new())})
                         };
                         
                         // VecDeque could wrap it self, so need this
                         if start >= 0 && start as usize > list.len() - 1 {
-                            return RespType::Array{ length: 0, value: Some(VecDeque::new())}.serialize()
+                            return Some(RespType::Array{ length: 0, value: Some(VecDeque::new())})
                         };
 
                         // Convert negative index to positive index
@@ -464,10 +514,10 @@ impl CmdHandler {
                         let min_index = start_abs.min(list.len() as i64 - 1) as usize;
                         let output_len = max_index - min_index + 1;
                         if output_len == 0 {
-                            RespType::Array{
+                            Some(RespType::Array{
                                 length: output_len, 
                                 value: Some(VecDeque::new())
-                            }.serialize()
+                            })
                         } else {
                             let mut output = RespType::Array{
                                 length: output_len as usize,
@@ -476,21 +526,21 @@ impl CmdHandler {
                             for i in list.iter().skip(min_index).take(output_len){
                                 output.add_item(RespType::BulkStr { length: i.len(), value: Some(i.clone()) }); 
                             };
-                            output.serialize()
+                            Some(output)
                         }
                     },
-                    _ => RespType::Error(
+                    _ => Some(RespType::Error(
                         Some(CmdError::UnsupportedCommand(key).to_string())
-                    ).serialize()
+                    ))
                 }
             },
             None => {
-                RespType::Array{ length: 0, value: Some(VecDeque::new()) }.serialize()
+                Some(RespType::Array{ length: 0, value: Some(VecDeque::new()) })
             }
         }
     }
     
-    fn cmd_lpush(&mut self, key: String, value: VecDeque<String>) -> Option<String> {
+    fn cmd_lpush(&mut self, key: String, value: VecDeque<String>) -> Option<RespType> {
         // Create list if not exists
         let item = self.data.entry(key.clone()).or_insert(
             StoreItem { 
@@ -502,34 +552,34 @@ impl CmdHandler {
                 for v in value {
                     list.push_front(v)
                 };
-                RespType::Integer(Some(list.len() as i64)).serialize()
+                Some(RespType::Integer(Some(list.len() as i64)))
             },
-            _ => RespType::Error(
+            _ => Some(RespType::Error(
                 Some(CmdError::UnsupportedCommand(key).to_string())
-            ).serialize()
+            ))
         }
         
     }
 
-    fn cmd_llen(&self, key: String) -> Option<String> {
+    fn cmd_llen(&self, key: String) -> Option<RespType> {
         match self.data.get(&key) {
             Some(item) => {
                 match &item.value {
                     StoreValue::List(list) => {
-                        RespType::Integer(Some(list.len() as i64)).serialize()
+                        Some(RespType::Integer(Some(list.len() as i64)))
                     },
                     _ => {
-                        RespType::Error(
+                        Some(RespType::Error(
                             Some(CmdError::UnsupportedCommand(key).to_string())
-                        ).serialize()
+                        ))
                     }
                 }
             },
-            None => RespType::Integer(Some(0)).serialize() 
+            None => Some(RespType::Integer(Some(0))) 
         }
     }
     
-    fn cmd_lpop(&mut self, key: String, length: Option<usize>) -> Option<String> {
+    fn cmd_lpop(&mut self, key: String, length: Option<usize>) -> Option<RespType> {
         match self.data.get_mut(&key) {
             Some(item) => {
                 match &mut item.value {
@@ -542,31 +592,31 @@ impl CmdHandler {
                                     output.add_item(
                                         RespType::BulkStr { length: v.len(), value: Some(v) }); 
                                 };
-                                output.serialize()
+                                Some(output)
                             },
                             None => {
                                 match list.pop_front() {
                                     Some(s) => {
-                                        RespType::BulkStr {
-                                            length: s.len(), value: Some(s)}.serialize()
+                                        Some(RespType::BulkStr {
+                                            length: s.len(), value: Some(s)})
                                     },
                                     None => {
-                                        RespType::BulkStr {
-                                            length: 0, value: None }.serialize()
+                                        Some(RespType::BulkStr {
+                                            length: 0, value: None })
                                     }
                                 }
                             }
                         }
                     },
                     _ => {
-                        RespType::Error(
+                        Some(RespType::Error(
                             Some(CmdError::UnsupportedCommand(key).to_string())
-                        ).serialize()
+                        ))
                     }
                 }
             },
             None => {
-                RespType::BulkStr { length: 0, value: None }.serialize()
+                Some(RespType::BulkStr { length: 0, value: None })
             }
         }         
     }
@@ -575,7 +625,7 @@ impl CmdHandler {
         &mut self, 
         key: String, 
         timeout_ms: Option<i64>, 
-        client_id: u64) -> Option<String> 
+        client_id: u64) -> Option<RespType> 
     {
         let (timestamp, deadline) = Self::get_deadline(timeout_ms);
         let key_task = key.clone();
@@ -637,7 +687,7 @@ impl CmdHandler {
                             let value = RespType::BulkStr { length: item.len(), value: Some(item) };
                             output.add_item(list_name);
                             output.add_item(value);
-                            output.serialize()
+                            Some(output)
                         } else {
                             // Wait
                             self.registry.insert(
@@ -646,9 +696,9 @@ impl CmdHandler {
                             None
                         }
                     },
-                    _ => RespType::Error(
+                    _ => Some(RespType::Error(
                         Some(CmdError::UnsupportedCommand(key).to_string())
-                    ).serialize()
+                    ))
                 }
             },
             None => {
@@ -662,14 +712,14 @@ impl CmdHandler {
         }
     }
 
-    fn cmd_type(&self, key: String) -> Option<String> {
+    fn cmd_type(&self, key: String) -> Option<RespType> {
         let ktype = match self.data.get(&key) {
             Some(item) => {
                 item.value.get_type().to_string()
             },
             None => "none".to_string()
         };
-        RespType::SimpleStr(Some(ktype)).serialize()
+        Some(RespType::SimpleStr(Some(ktype)))
     }
 
     fn cmd_xadd(
@@ -678,25 +728,25 @@ impl CmdHandler {
         id: (Option<u64>, Option<u64>), 
         // For this stage, id is explicitely declare
         // TODO: handle case id = * and id = 123-*
-        value: Vec<String>) -> Option<String> {
+        value: Vec<String>) -> Option<RespType> {
         // Add key if not exists
         self.data.entry(key.clone()).or_insert(StoreItem {
             value: StoreValue::Stream(BTreeMap::new()),
             expired_at: None });
 
         // Error messages
-        let msg_invalid_last = RespType::Error(Some(
+        let msg_invalid_last = Some(RespType::Error(Some(
            "ERR The ID specified in XADD is equal \
            or smaller than the target stream top item".to_string())
-        ).serialize();
+        ));
 
-        let msg_invalid_00 = RespType::Error(Some(
+        let msg_invalid_00 = Some(RespType::Error(Some(
             "ERR The ID specified in XADD must be greater than 0-0".to_string())
-        ).serialize();
+        ));
 
-        let msg_invalid_format = RespType::Error(Some(
+        let msg_invalid_format = Some(RespType::Error(Some(
             "ERR Invalid stream id format".to_string())
-        ).serialize();
+        ));
 
         // Check valid type
         let id_valid: (u64, u64) = match &self.data.get(&key).unwrap().value {
@@ -746,9 +796,9 @@ impl CmdHandler {
                 }
             },
             _ => {
-                return RespType::Error(Some(
+                return Some(RespType::Error(Some(
                     CmdError::UnsupportedCommand(key).to_string())
-                ).serialize();
+                ));
             }
 
         };
@@ -757,8 +807,7 @@ impl CmdHandler {
             StoreValue::Stream(btree) => {
                 btree.insert((id_valid.0, id_valid.1), value);
                 let msg = format!("{}-{}", id_valid.0, id_valid.1);
-                RespType::BulkStr { length: msg.len(), value: Some(msg) }
-                    .serialize()
+                Some(RespType::BulkStr { length: msg.len(), value: Some(msg) })
             },
             _ => None
         }
@@ -813,7 +862,7 @@ impl CmdHandler {
         &mut self,
         key: String,
         start: (u64, u64),
-        end: (u64, u64)) -> Option<String> {
+        end: (u64, u64)) -> Option<RespType> {
         match self.data.get(&key) {
             Some(item) => {
                 match &item.value  {
@@ -832,17 +881,17 @@ impl CmdHandler {
                         let mut kv_arr = Self::_get_resp_stream_entity(&kv_vec);
                         kv_arr.drain(..).for_each(|t| output.add_item(t));
 
-                        output.serialize()
+                        Some(output)
                     },
-                    _ => return RespType::Error(Some(
+                    _ => return Some(RespType::Error(Some(
                             CmdError::UnsupportedCommand(key).to_string())
-                        ).serialize(),
+                        )),
                 }
             },
-            None => return RespType::Array {
+            None => return Some(RespType::Array {
                     length: 0,
                     value: Some(VecDeque::new())
-                }.serialize(),
+                }),
         }
     }
 
@@ -927,15 +976,15 @@ impl CmdHandler {
         count: Option<u64>,
         block: Option<u64>,
         stream: Vec<(String, u64, u64)>,
-        client_id: u64) -> Option<String> {
+        client_id: u64) -> Option<RespType> {
         // Check valid type first
         for (key, _, _) in &stream{
             match self.data.get(key) {
                 Some(item) => match &item.value {
                     StoreValue::Stream(_) => {/* Do nothing */},
-                    _ => return RespType::Error(Some(
+                    _ => return Some(RespType::Error(Some(
                             CmdError::UnsupportedCommand(key.clone()).to_string())
-                        ).serialize()
+                        ))
                 },
                 None => { /* Do nothing */ }
             }
@@ -1038,10 +1087,10 @@ impl CmdHandler {
                 },   
                 None => {
                     // Return blank array
-                    return RespType::Array {
+                    return Some(RespType::Array {
                         length: 0,
                         value: Some(VecDeque::new())
-                    }.serialize()
+                    })
                 }
             }
         } else {
@@ -1054,19 +1103,23 @@ impl CmdHandler {
                 pair.add_item(entries);
                 arr_stream.add_item(pair);
             };
-            return arr_stream.serialize()
+            return Some(arr_stream)
         }
 
         // Put to backlog if not fullfilled
         None
     }
 
-    fn cmd_incr(&mut self, key: String) -> Option<String> { 
+    fn cmd_incr(&mut self, key: String) -> Option<RespType> { 
         let item = self.data.entry(key.clone()).or_insert(
             StoreItem {
                 value: StoreValue::Str("0".to_string()),
                 expired_at: None,
             }
+        );
+
+        let err_out_of_range = RespType::Error(
+            Some("ERR value is not an integer or out of range".to_string()) 
         );
 
         match &mut item.value {
@@ -1076,34 +1129,68 @@ impl CmdHandler {
                     Ok(i) => {
                         if i < i64::MAX {
                             *s = i64::to_string(&(i + 1));
-                            Some(
-                                RespType::Integer(Some(i + 1))
-                                .serialize().unwrap())
+                            Some(RespType::Integer(Some(i + 1)))
                         } else {
                             Some(
                                 RespType::Error(
                                     Some(CmdError::UnprocessableError(
                                         "Intever overflow".to_string()
                                     ).to_string())
-                                ).serialize().unwrap())}},
-                    Err(_) => Some(
-                        RespType::Error(
-                            Some(
-                                "ERR value is not an integer or out of range".to_string()
-                                ) 
-                            ).serialize().unwrap()),
+                                ))
+                        }
+                    },
+                    Err(_) => Some(err_out_of_range)
                 }
             },
             _ => {
-                Some(
-                    RespType::Error(
-                        Some(
-                            "ERR value is not an integer or out of range".to_string()
-                            )
-                    ).serialize().unwrap()
-                )
+                Some(err_out_of_range)
             }
         }
-        
+    }
+    
+    fn cmd_multi(&mut self, client_id: u64) -> Option<RespType> {
+        let no_txn: bool = match self.registry.backlog_txn.get_mut(&client_id) {
+            Some(_) => false, 
+            None => true, 
+        };
+
+        if no_txn {
+            self.registry.backlog_txn.insert(client_id, VecDeque::new());
+            Self::response_ok() 
+        } else {
+            Some(RespType::SimpleStr(
+                Some("ERR MULTI calls can not be nested".to_string()))
+                ) 
+        }
+    }
+
+    fn cmd_exec(&mut self, client_id: u64) -> Option<RespType> {
+        let is_txn: bool = match self.registry.backlog_txn.get(&client_id) {
+            Some(_) => { true },
+            None => { false }
+        }; 
+
+        if is_txn {
+            let cmd_queue = self.registry.backlog_txn.get_mut(&client_id).unwrap();
+            let mut vec_cmd: Vec<Cmd> = Vec::new();
+            let mut vec_resp: Vec<RespType> = Vec::new();
+            cmd_queue.drain(..).for_each(|cmd| vec_cmd.push(cmd));
+            
+            // Execute
+            vec_cmd.drain(..).for_each(|cmd| 
+                match self._execute_cmd(cmd, client_id, false).extract_resp() {
+                    Some(resp) => vec_resp.push(resp),
+                    None => {}
+                }
+            );
+            
+            let _ = self.registry.backlog_txn.remove(&client_id);
+            let mut arr_output = RespType::Array { length: vec_resp.len(), value: None };
+            vec_resp.drain(..).for_each(|r| arr_output.add_item(r));
+            Some(arr_output)
+        } else {
+            // No transaction opened
+            None
+        }
     }
 }

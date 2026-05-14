@@ -4,7 +4,7 @@ use std::string::ParseError;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::u64;
 
-use crate::resp::{ RespType, RespValue };
+use crate::resp::{ ParseStatus, RespType, RespValue };
 use crate::epoll::timer_create_event;
 use crate::utils::now;
 
@@ -31,6 +31,9 @@ const KW_STREAMS: &str = "STREAMS";
 const KW_COUNT: &str = "COUNT";
 const KW_BLOCK: &str = "BLOCK";
 const KW_INCR: &str = "INCR";
+const KW_MULTI: &str = "MULTI";
+pub const KW_QUEUED: &str = "QUEUED";
+const KW_EXEC: &str = "EXEC";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -79,6 +82,8 @@ pub enum Cmd {
     XRANGE{ key: String, start: (u64, u64), end: (u64, u64)},
     XREAD{ count: Option<u64>, block_ms: Option<u64>, stream: Vec<(String, u64, u64)>, },
     INCR(String),
+    MULTI,
+    EXEC,
 }
 
 impl Cmd {
@@ -465,6 +470,14 @@ impl Cmd {
         Ok(Cmd::INCR(key))
     }
 
+    pub fn multi() -> Result<Self, CmdError> {
+        Ok(Cmd::MULTI)
+    }
+
+    pub fn exec() -> Result<Self, CmdError> {
+        Ok(Cmd::EXEC)
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -526,6 +539,12 @@ impl Cmd {
                                         },
                                         s if s == KW_INCR => {
                                             return Self::incr(v)
+                                        },
+                                        s if s == KW_MULTI => {
+                                            return Self::multi()
+                                        },
+                                        s if s == KW_EXEC => {
+                                            return Self::exec()
                                         },
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))
