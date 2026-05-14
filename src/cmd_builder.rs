@@ -34,6 +34,7 @@ const KW_INCR: &str = "INCR";
 const KW_MULTI: &str = "MULTI";
 pub const KW_QUEUED: &str = "QUEUED";
 const KW_EXEC: &str = "EXEC";
+const KW_DISCARD: &str = "DISCARD";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -84,6 +85,7 @@ pub enum Cmd {
     INCR(String),
     MULTI,
     EXEC,
+    DISCARD,
 }
 
 impl Cmd {
@@ -478,6 +480,10 @@ impl Cmd {
         Ok(Cmd::EXEC)
     }
 
+    pub fn discard() -> Result<Self, CmdError> {
+        Ok(Cmd::DISCARD)
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -545,6 +551,9 @@ impl Cmd {
                                         },
                                         s if s == KW_EXEC => {
                                             return Self::exec()
+                                        },
+                                        s if s == KW_DISCARD => {
+                                            return Self::discard()
                                         },
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))

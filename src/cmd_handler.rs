@@ -256,6 +256,7 @@ impl CmdHandler {
             Cmd::INCR(key) => self.cmd_incr(key),
             Cmd::MULTI => self.cmd_multi(client_id),
             Cmd::EXEC => self.cmd_exec(client_id),
+            Cmd::DISCARD => self.cmd_discard(client_id),
         };
         
         if let Some(resp) = output {
@@ -279,6 +280,12 @@ impl CmdHandler {
                         Cmd::EXEC => {
                             // Execute transaction
                             match self.cmd_exec(client_id) {
+                                Some(resp) => resp.serialize(),
+                                None => None,
+                            }
+                        },
+                        Cmd::DISCARD => {
+                            match self.cmd_discard(client_id) {
                                 Some(resp) => resp.serialize(),
                                 None => None,
                             }
@@ -1206,6 +1213,23 @@ impl CmdHandler {
         } else {
             // No transaction opened
             Some(RespType::Error(Some("ERR EXEC without MULTI".to_string()))) 
+        }
+    }
+
+    fn cmd_discard(&mut self, client_id: u64) -> Option<RespType> {
+        let is_txn: bool = match self.registry.backlog_txn.get(&client_id) {
+            Some(_) => { true },
+            None => { false }
+        };
+
+        if is_txn {
+            let txn = self.registry.backlog_txn.get_mut(&client_id).unwrap();
+            txn.drain(..);
+            self.registry.backlog_txn.remove(&client_id);
+            Self::response_ok()
+        } else {
+            // Error must report st
+            Some(RespType::Error(Some("ERR DISCARD without MULTI".to_string())))
         }
     }
 }
