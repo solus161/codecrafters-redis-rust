@@ -1190,7 +1190,7 @@ impl CmdHandler {
             Some(arr_output)
         } else {
             // No transaction opened
-            None
+            Some(RespType::Error(Some("ERR EXEC without MULTI".to_string()))) 
         }
     }
 }
