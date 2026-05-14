@@ -275,10 +275,21 @@ impl CmdHandler {
                 if !self.registry.backlog_txn.contains_key(&client_id) {
                     self._execute_cmd(c, client_id, true).extract_str() 
                 } else {
-                    // Building a transaction
-                    self.registry.backlog_txn.entry(client_id).or_insert_with(VecDeque::new)
-                        .push_back(c);
-                    RespType::SimpleStr(Some(KW_QUEUED.to_string())).serialize()
+                    match c {
+                        Cmd::EXEC => {
+                            // Execute transaction
+                            match self.cmd_exec(client_id) {
+                                Some(resp) => resp.serialize(),
+                                None => None,
+                            }
+                        },
+                        _ => {
+                            // Building a transaction
+                            self.registry.backlog_txn.entry(client_id).or_insert_with(VecDeque::new)
+                                .push_back(c);
+                            RespType::SimpleStr(Some(KW_QUEUED.to_string())).serialize()
+                        }
+                    }
                 }
                 
             },
@@ -1185,9 +1196,13 @@ impl CmdHandler {
             );
             
             let _ = self.registry.backlog_txn.remove(&client_id);
-            let mut arr_output = RespType::Array { length: vec_resp.len(), value: None };
-            vec_resp.drain(..).for_each(|r| arr_output.add_item(r));
-            Some(arr_output)
+            if !vec_resp.is_empty() {
+                let mut arr_output = RespType::Array { length: vec_resp.len(), value: None };
+                vec_resp.drain(..).for_each(|r| arr_output.add_item(r));
+                Some(arr_output)
+            } else {
+                Some(RespType::Array { length: 0, value: Some(VecDeque::new()) })
+            }
         } else {
             // No transaction opened
             Some(RespType::Error(Some("ERR EXEC without MULTI".to_string()))) 
