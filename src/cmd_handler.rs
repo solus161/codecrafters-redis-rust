@@ -312,6 +312,7 @@ impl CmdHandler {
             Cmd::EXEC => self.cmd_exec(client_id),
             Cmd::DISCARD => self.cmd_discard(client_id),
             Cmd::WATCH(keys) => self.cmd_watch(keys, client_id),
+            Cmd::UNWATCH => self.cmd_unwatch(client_id),
         };
 
         if let Some(resp) = output {
@@ -1307,6 +1308,11 @@ impl CmdHandler {
 
     fn cmd_watch(&mut self, keys: Vec<String>, client_id: u64) -> Option<RespType> {
         self.registry.watch(keys, client_id);
+        Self::response_ok()
+    }
+
+    fn cmd_unwatch(&mut self, client_id: u64) -> Option<RespType> {
+        self.registry.unwatch_all(&client_id);
         Self::response_ok()
     }
 }

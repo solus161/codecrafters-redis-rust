@@ -36,6 +36,7 @@ pub const KW_QUEUED: &str = "QUEUED";
 const KW_EXEC: &str = "EXEC";
 const KW_DISCARD: &str = "DISCARD";
 const KW_WATCH: &str = "WATCH";
+const KW_UNWATCH: &str = "UNWATCH";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -88,6 +89,7 @@ pub enum Cmd {
     EXEC,
     DISCARD,
     WATCH(Vec<String>),
+    UNWATCH,
 }
 
 impl Cmd {
@@ -496,6 +498,10 @@ impl Cmd {
         }
     }
 
+    pub fn unwatch() -> Result<Self, CmdError> {
+        Ok(Self::UNWATCH)
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -569,6 +575,9 @@ impl Cmd {
                                         },
                                         s if s == KW_WATCH => {
                                             return Self::watch(v)
+                                        },
+                                        s if s == KW_UNWATCH => {
+                                            return Self::unwatch()
                                         },
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))
