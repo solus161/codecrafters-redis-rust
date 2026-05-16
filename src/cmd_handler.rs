@@ -210,23 +210,10 @@ impl RequestRegistry {
             .entry(client_id).or_insert(false);
     }
 
-    pub fn unwatch(&mut self, client_id: &u64, cmd: &Cmd) {
-        match cmd {
-            Cmd::SET { key, .. } |
-            Cmd::LPUSH { key, .. } | Cmd::RPUSH { key, .. } |
-            Cmd::LPOP { key, .. } | Cmd::BLPOP { key, .. } => {
-                match self.watchlist.get_mut(key) {
-                    Some(w) => {
-                        w.remove(client_id);
-                    },
-                    None => {
-                        // Not watching any key
-                    }
-                }
-            },
-            _ => {}
+    pub fn unwatch_all(&mut self, client_id: &u64) {
+        for (_, v) in self.watchlist.iter_mut() {
+            v.remove(client_id); 
         }
-        
     }
 
     pub fn set_dirty(&mut self, cmd: &Cmd) {
@@ -236,7 +223,8 @@ impl RequestRegistry {
             Cmd::LPOP { key, .. } | Cmd::BLPOP { key, .. } => {
                 match self.watchlist.get_mut(key) {
                     Some(w) => {
-                        for (_, dirty) in w {
+                        for (client_id, dirty) in w {
+                            println!("Set dirty for key {} client_id {}", key, client_id);
                             *dirty = true
                         }
                     },
@@ -249,16 +237,10 @@ impl RequestRegistry {
         }
     }
 
-    pub fn is_dirty(&self, key: &str, client_id: &u64) -> bool {
-         match self.watchlist.get(key) {
-             Some(w) => {
-                 match w.get(client_id) {
-                     Some(dirty) => *dirty,
-                     None => false
-                 }
-             },
-             None => false
-         }
+    pub fn is_any_dirty(&self, client_id: &u64) -> bool {
+        self.watchlist.values().any(|clients| {
+            clients.get(client_id).copied().unwrap_or(false)
+        })
     }
 }
 
@@ -1246,6 +1228,7 @@ impl CmdHandler {
 
         if no_txn {
             self.registry.backlog_txn.insert(client_id, VecDeque::new());
+            println!("Open txn for client_id {}", &client_id);
             Self::response_ok() 
         } else {
             Some(RespType::SimpleStr(
@@ -1262,17 +1245,13 @@ impl CmdHandler {
 
         if is_txn {
             // Check for dirty first
-            let has_dirty = self.registry.backlog_txn.get(&client_id).unwrap()
-                .iter().any(|c| match c {
-                Cmd::SET { key, .. } |
-                Cmd::LPUSH { key, .. } | Cmd::RPUSH { key, .. } |
-                Cmd::LPOP { key, .. } | Cmd::BLPOP { key, .. } => {
-                    self.registry.is_dirty(key, &client_id)
-                },
-                _ => false,
-            });
+            println!("Checking dirty for client_id {}", &client_id);
+            let has_dirty = self.registry.is_any_dirty(&client_id);
+
+            println!("has_dirty {}", &has_dirty);
             
             if has_dirty {
+                self.registry.unwatch_all(&client_id);
                 let _ = self.registry.backlog_txn.remove(&client_id);
                 return Some(RespType::Array { length: 0, value: None });
             };
@@ -1285,15 +1264,13 @@ impl CmdHandler {
             // Execute
             vec_cmd.drain(..).for_each(|cmd| {
                     // Cmd will certainly be executed, could unwatch now
-                    self.registry.unwatch(&client_id, &cmd);
+                // self.registry.unwatch(&client_id, &cmd);
 
-                    // Extract key for unwatch
-                    match self._execute_cmd(cmd, client_id, false).extract_resp() {
-                        Some(resp) => vec_resp.push(resp),
-                        None => {}
-                    }
-                } 
-            );
+                match self._execute_cmd(cmd, client_id, false).extract_resp() {
+                    Some(resp) => vec_resp.push(resp),
+                    None => {}
+                }
+            });
             
             let _ = self.registry.backlog_txn.remove(&client_id);
             if !vec_resp.is_empty() {

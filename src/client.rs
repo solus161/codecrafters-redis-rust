@@ -59,7 +59,7 @@ impl TcpClient {
                     let cmd = Cmd::from_resp(t);
                     println!("Cmd completed: {:?}", &cmd);
                     if let Some(r) = self.cmd_handler.borrow_mut().handle(cmd, self.fd_key) {
-                        self.stream.write_all(r.as_bytes())?
+                        self.stream.write_all(r.as_bytes())?;
                     }
                 },
                 None => break,
