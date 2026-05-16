@@ -35,6 +35,7 @@ const KW_MULTI: &str = "MULTI";
 pub const KW_QUEUED: &str = "QUEUED";
 const KW_EXEC: &str = "EXEC";
 const KW_DISCARD: &str = "DISCARD";
+const KW_WATCH: &str = "WATCH";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -86,6 +87,7 @@ pub enum Cmd {
     MULTI,
     EXEC,
     DISCARD,
+    WATCH(String),
 }
 
 impl Cmd {
@@ -462,26 +464,33 @@ impl Cmd {
             ));
         };
 
-        Ok(Cmd::XREAD { count, block_ms, stream })
+        Ok(Self::XREAD { count, block_ms, stream })
     }
     
     pub fn incr(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
         let key: String = values.pop_front()
            .ok_or(CmdError::MissingArgument("No key provided for INCR".to_string()))?
            .get_value().unwrap().str().unwrap();
-        Ok(Cmd::INCR(key))
+        Ok(Self::INCR(key))
     }
 
     pub fn multi() -> Result<Self, CmdError> {
-        Ok(Cmd::MULTI)
+        Ok(Self::MULTI)
     }
 
     pub fn exec() -> Result<Self, CmdError> {
-        Ok(Cmd::EXEC)
+        Ok(Self::EXEC)
     }
 
     pub fn discard() -> Result<Self, CmdError> {
-        Ok(Cmd::DISCARD)
+        Ok(Self::DISCARD)
+    }
+
+    pub fn watch(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let key: String = values.pop_front()
+           .ok_or(CmdError::MissingArgument("No key provided for WATCH".to_string()))?
+           .get_value().unwrap().str().unwrap();
+        Ok(Self::WATCH(key))
     }
 
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
@@ -554,6 +563,9 @@ impl Cmd {
                                         },
                                         s if s == KW_DISCARD => {
                                             return Self::discard()
+                                        },
+                                        s if s == KW_WATCH => {
+                                            return Self::watch(v)
                                         },
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))

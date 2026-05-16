@@ -93,6 +93,9 @@ struct RequestRegistry {
 
     // Transaction
     backlog_txn: HashMap<u64, VecDeque<Cmd>>,
+    
+    // Watch list, key - (client_id - dirty)
+    watchlist: HashMap<String, HashMap<u64, bool>>,
 
     // deadline - timestamp
     deadline: BTreeMap<u64, u64>,
@@ -106,6 +109,7 @@ impl RequestRegistry {
             backlog_list: HashMap::new(),
             backlog_stream: HashSet::new(),
             backlog_txn: HashMap::new(),
+            watchlist: HashMap::new(),
             deadline: BTreeMap::new(),
             timer_fd,
         }
@@ -195,6 +199,68 @@ impl RequestRegistry {
     pub fn get_nearest_deadline(&self) -> Option<(&u64, &u64)> {
         self.deadline.first_key_value() 
     }
+
+    pub fn add_to_txn(&mut self, client_id: u64, cmd: Cmd) {
+        self.backlog_txn.entry(client_id)
+            .or_insert_with(VecDeque::new).push_back(cmd);
+    }
+
+    pub fn watch(&mut self, key: String, client_id: u64) {
+        // Start watch
+        self.watchlist.entry(key).or_insert_with(HashMap::new)
+            .entry(client_id).or_insert(false);
+    }
+
+    pub fn unwatch(&mut self, client_id: &u64, cmd: &Cmd) {
+        match cmd {
+            Cmd::SET { key, .. } |
+            Cmd::LPUSH { key, .. } | Cmd::RPUSH { key, .. } |
+            Cmd::LPOP { key, .. } | Cmd::BLPOP { key, .. } => {
+                match self.watchlist.get_mut(key) {
+                    Some(w) => {
+                        w.remove(client_id);
+                    },
+                    None => {
+                        // Not watching any key
+                    }
+                }
+            },
+            _ => {}
+        }
+        
+    }
+
+    pub fn set_dirty(&mut self, cmd: &Cmd) {
+        match cmd {
+            Cmd::SET { key, .. } |
+            Cmd::LPUSH { key, .. } | Cmd::RPUSH { key, .. } |
+            Cmd::LPOP { key, .. } | Cmd::BLPOP { key, .. } => {
+                match self.watchlist.get_mut(key) {
+                    Some(w) => {
+                        for (_, dirty) in w {
+                            *dirty = true
+                        }
+                    },
+                    None => {
+                        // Not watching any key
+                    }
+                }
+            },
+            _ => {/* Not modifying key */}
+        }
+    }
+
+    pub fn is_dirty(&self, key: &str, client_id: &u64) -> bool {
+         match self.watchlist.get(key) {
+             Some(w) => {
+                 match w.get(client_id) {
+                     Some(dirty) => *dirty,
+                     None => false
+                 }
+             },
+             None => false
+         }
+    }
 }
 
 //---------Command handler, convert Cmd struct into action
@@ -236,7 +302,12 @@ impl CmdHandler {
         }
     }
 
-    fn _execute_cmd(&mut self, cmd: Cmd, client_id: u64, serialized: bool) -> CmdOutput {
+    fn _execute_cmd(
+        &mut self, cmd: Cmd, client_id: u64,
+        serialized: bool) -> CmdOutput {
+        // Set dirty first
+        self.registry.set_dirty(&cmd); 
+
         let output: Option<RespType> = match cmd {
             Cmd::PING => Self::cmd_ping(),
             Cmd::ECHO(s) => Self::cmd_echo(s),
@@ -257,8 +328,9 @@ impl CmdHandler {
             Cmd::MULTI => self.cmd_multi(client_id),
             Cmd::EXEC => self.cmd_exec(client_id),
             Cmd::DISCARD => self.cmd_discard(client_id),
+            Cmd::WATCH(key) => self.cmd_watch(key, client_id),
         };
-        
+
         if let Some(resp) = output {
             if serialized {
                 CmdOutput::Str(resp.serialize().unwrap())
@@ -292,8 +364,7 @@ impl CmdHandler {
                         },
                         _ => {
                             // Building a transaction
-                            self.registry.backlog_txn.entry(client_id).or_insert_with(VecDeque::new)
-                                .push_back(c);
+                            self.registry.add_to_txn(client_id, c);
                             RespType::SimpleStr(Some(KW_QUEUED.to_string())).serialize()
                         }
                     }
@@ -1189,17 +1260,38 @@ impl CmdHandler {
         }; 
 
         if is_txn {
+            // Check for dirty first
+            let has_dirty = self.registry.backlog_txn.get(&client_id).unwrap()
+                .iter().any(|c| match c {
+                Cmd::SET { key, .. } |
+                Cmd::LPUSH { key, .. } | Cmd::RPUSH { key, .. } |
+                Cmd::LPOP { key, .. } | Cmd::BLPOP { key, .. } => {
+                    self.registry.is_dirty(key, &client_id)
+                },
+                _ => false,
+            });
+            
+            if has_dirty {
+                let _ = self.registry.backlog_txn.remove(&client_id);
+                return Some(RespType::Array { length: 0, value: None });
+            };
+
             let cmd_queue = self.registry.backlog_txn.get_mut(&client_id).unwrap();
             let mut vec_cmd: Vec<Cmd> = Vec::new();
             let mut vec_resp: Vec<RespType> = Vec::new();
             cmd_queue.drain(..).for_each(|cmd| vec_cmd.push(cmd));
             
             // Execute
-            vec_cmd.drain(..).for_each(|cmd| 
-                match self._execute_cmd(cmd, client_id, false).extract_resp() {
-                    Some(resp) => vec_resp.push(resp),
-                    None => {}
-                }
+            vec_cmd.drain(..).for_each(|cmd| {
+                    // Cmd will certainly be executed, could unwatch now
+                    self.registry.unwatch(&client_id, &cmd);
+
+                    // Extract key for unwatch
+                    match self._execute_cmd(cmd, client_id, false).extract_resp() {
+                        Some(resp) => vec_resp.push(resp),
+                        None => {}
+                    }
+                } 
             );
             
             let _ = self.registry.backlog_txn.remove(&client_id);
@@ -1231,5 +1323,10 @@ impl CmdHandler {
             // Error must report st
             Some(RespType::Error(Some("ERR DISCARD without MULTI".to_string())))
         }
+    }
+
+    fn cmd_watch(&mut self, key: String, client_id: u64) -> Option<RespType> {
+        self.registry.watch(key, client_id);
+        Self::response_ok()
     }
 }
