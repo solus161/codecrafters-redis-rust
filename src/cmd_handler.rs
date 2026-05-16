@@ -1275,6 +1275,7 @@ impl CmdHandler {
                 }
             });
             
+            self.registry.unwatch_all(&client_id);
             let _ = self.registry.backlog_txn.remove(&client_id);
             if !vec_resp.is_empty() {
                 let mut arr_output = RespType::Array { length: vec_resp.len(), value: None };

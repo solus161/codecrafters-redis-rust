@@ -1,5 +1,6 @@
 #![allow(unused_imports)]
 use std::cell::RefCell;
+use std::env;
 use std::collections::HashMap;
 use std::net::{ TcpListener, TcpStream };
 use std::io::{self, BufRead, BufReader, Error, ErrorKind, Read, Write}; 
@@ -24,8 +25,22 @@ use crate::resp::RespParser;
 use crate::cmd_handler::CmdHandler;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parsing args for port
+    let args: Vec<String> = env::args().collect();
+    let mut port: u16 = 6379;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--port" => {
+                port = args[i + 1].parse().unwrap();
+                i += 2;
+            },
+            _ => {}
+        }
+    };
+
     // Fd for listener 
-    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
     listener.set_nonblocking(true).unwrap();
     let listener_fd = listener.as_raw_fd();
     let listener_fd_u64 = listener_fd as u64;
