@@ -205,9 +205,11 @@ impl RequestRegistry {
             .or_insert_with(VecDeque::new).push_back(cmd);
     }
 
-    pub fn watch(&mut self, key: String, client_id: u64) {
-        self.watchlist.entry(key).or_insert_with(HashMap::new)
-            .entry(client_id).or_insert(false);
+    pub fn watch(&mut self, mut keys: Vec<String>, client_id: u64) {
+        keys.drain(..).for_each(|k| {
+            self.watchlist.entry(k).or_insert_with(HashMap::new)
+                .entry(client_id).or_insert(false);
+        }) 
     }
 
     pub fn unwatch_all(&mut self, client_id: &u64) {
@@ -309,7 +311,7 @@ impl CmdHandler {
             Cmd::MULTI => self.cmd_multi(client_id),
             Cmd::EXEC => self.cmd_exec(client_id),
             Cmd::DISCARD => self.cmd_discard(client_id),
-            Cmd::WATCH(key) => self.cmd_watch(key, client_id),
+            Cmd::WATCH(keys) => self.cmd_watch(keys, client_id),
         };
 
         if let Some(resp) = output {
@@ -1303,8 +1305,8 @@ impl CmdHandler {
         }
     }
 
-    fn cmd_watch(&mut self, key: String, client_id: u64) -> Option<RespType> {
-        self.registry.watch(key, client_id);
+    fn cmd_watch(&mut self, keys: Vec<String>, client_id: u64) -> Option<RespType> {
+        self.registry.watch(keys, client_id);
         Self::response_ok()
     }
 }

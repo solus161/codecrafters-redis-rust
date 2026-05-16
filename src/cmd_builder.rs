@@ -87,7 +87,7 @@ pub enum Cmd {
     MULTI,
     EXEC,
     DISCARD,
-    WATCH(String),
+    WATCH(Vec<String>),
 }
 
 impl Cmd {
@@ -487,10 +487,13 @@ impl Cmd {
     }
 
     pub fn watch(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
-        let key: String = values.pop_front()
-           .ok_or(CmdError::MissingArgument("No key provided for WATCH".to_string()))?
-           .get_value().unwrap().str().unwrap();
-        Ok(Self::WATCH(key))
+        let mut keys: Vec<String> = Vec::new();
+        values.drain(..).for_each(|v| keys.push(v.get_value().unwrap().str().unwrap()));
+        if keys.is_empty() {
+            Err(CmdError::MissingArgument("No key provided for WATCH".to_string()))
+        } else {
+            Ok(Self::WATCH(keys))
+        }
     }
 
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
