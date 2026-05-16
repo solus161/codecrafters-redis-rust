@@ -1299,6 +1299,7 @@ impl CmdHandler {
             let txn = self.registry.backlog_txn.get_mut(&client_id).unwrap();
             txn.drain(..);
             self.registry.backlog_txn.remove(&client_id);
+            self.registry.unwatch_all(&client_id);
             Self::response_ok()
         } else {
             // Error must report st
