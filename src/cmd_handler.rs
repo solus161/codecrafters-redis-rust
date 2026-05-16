@@ -206,7 +206,6 @@ impl RequestRegistry {
     }
 
     pub fn watch(&mut self, key: String, client_id: u64) {
-        // Start watch
         self.watchlist.entry(key).or_insert_with(HashMap::new)
             .entry(client_id).or_insert(false);
     }
@@ -362,6 +361,11 @@ impl CmdHandler {
                                 None => None,
                             }
                         },
+                        Cmd::WATCH(_) => {
+                            RespType::Error(Some(
+                                "ERR WATCH inside MULTI is not allowed".to_string()))
+                                .serialize()
+                        }
                         _ => {
                             // Building a transaction
                             self.registry.add_to_txn(client_id, c);
@@ -1238,10 +1242,7 @@ impl CmdHandler {
     }
     
     fn cmd_multi(&mut self, client_id: u64) -> Option<RespType> {
-        let no_txn: bool = match self.registry.backlog_txn.get_mut(&client_id) {
-            Some(_) => false, 
-            None => true, 
-        };
+        let no_txn: bool = !self.registry.backlog_txn.contains_key(&client_id);
 
         if no_txn {
             self.registry.backlog_txn.insert(client_id, VecDeque::new());
