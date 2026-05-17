@@ -3,14 +3,17 @@ use std::sync::OnceLock;
 use std::rc::Rc;
 
 enum Replication {
-    Master,
+    Master{ id: String, offset: u64 },
     Slave{ host: String, port: u16 },
 }
 
 impl Replication {
     fn parse_role(s: Option<String>) -> Self {
         match s {
-            None => Self::Master,
+            None => Self::Master{
+                id: "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_string(),
+                offset: 0
+            },
             Some(s) => {
                 let mut splitted = s.split(" ");
                 let host = splitted.next().expect("Invalid replication host").to_string();
@@ -25,8 +28,9 @@ impl Replication {
 impl Display for Replication {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Master => write!(f, "master"),
-            Self::Slave { .. } => write!(f, "slave"),
+            Self::Master{ id, offset } => write!(f, 
+                "role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:{}", id, offset),
+            Self::Slave { .. } => write!(f, "role:slave"),
         }
     }
 }
@@ -71,7 +75,7 @@ impl Config {
     }
 
     pub fn get_info(&self) -> String {
-        format!("role:{}", self.role.to_string())
+        format!("{}", self.role.to_string())
     }
 }
 
