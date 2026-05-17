@@ -8,8 +8,9 @@ use libc::{key_t, write};
 
 use crate::resp::{ RespType, RespValue };
 use crate::epoll::timer_create_event;
-use crate::cmd_builder::{ Cmd, CmdError, CmdOption, KW_PONG, KW_QUEUED };
+use crate::cmd_builder::{ Cmd, CmdError, CmdOption, KW_PONG, KW_QUEUED, KW_REPLICATION };
 use crate::utils::now;
+use crate::app_state::AppState;
 
 // Stored value types for CmdHandler
 #[derive(Debug)]
@@ -313,6 +314,7 @@ impl CmdHandler {
             Cmd::DISCARD => self.cmd_discard(client_id),
             Cmd::WATCH(keys) => self.cmd_watch(keys, client_id),
             Cmd::UNWATCH => self.cmd_unwatch(client_id),
+            Cmd::INFO(key) => self.cmd_info(key),
         };
 
         if let Some(resp) = output {
@@ -1316,5 +1318,15 @@ impl CmdHandler {
     fn cmd_unwatch(&mut self, client_id: u64) -> Option<RespType> {
         self.registry.unwatch_all(&client_id);
         Self::response_ok()
+    }
+
+    fn cmd_info(&self, key: String) -> Option<RespType> {
+        if key.to_uppercase() == KW_REPLICATION {
+            let app_state = AppState::get();
+            let msg = app_state.borrow().get_replication();
+            Some(RespType::BulkStr { length: msg.len(), value: Some(msg) })
+        } else {
+            None
+        }
     }
 }

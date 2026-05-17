@@ -37,6 +37,8 @@ const KW_EXEC: &str = "EXEC";
 const KW_DISCARD: &str = "DISCARD";
 const KW_WATCH: &str = "WATCH";
 const KW_UNWATCH: &str = "UNWATCH";
+const KW_INFO: &str = "INFO";
+pub const KW_REPLICATION: &str = "REPLICATION";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -90,6 +92,7 @@ pub enum Cmd {
     DISCARD,
     WATCH(Vec<String>),
     UNWATCH,
+    INFO(String),
 }
 
 impl Cmd {
@@ -502,6 +505,13 @@ impl Cmd {
         Ok(Self::UNWATCH)
     }
 
+    pub fn info(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let key: String = values.pop_front()
+           .ok_or(CmdError::MissingArgument("No key provided for INFO".to_string()))?
+           .get_value().unwrap().str().unwrap();
+        Ok(Self::INFO(key))
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -578,6 +588,9 @@ impl Cmd {
                                         },
                                         s if s == KW_UNWATCH => {
                                             return Self::unwatch()
+                                        },
+                                        s if s == KW_INFO => {
+                                            return Self::info(v)
                                         },
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))

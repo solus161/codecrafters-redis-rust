@@ -10,6 +10,8 @@ use std::rc::Rc;
 use std::str::from_utf8;
 use libc;
 
+mod config;
+mod app_state;
 #[macro_use]
 mod utils;
 mod epoll;
@@ -19,6 +21,7 @@ mod client;
 mod resp;
 mod tests;
 
+use crate::config::Config;
 use crate::client::{TcpClient, BUFFER_SIZE};
 use crate::epoll::{get_epoll_event_read, timer_create_event, timer_create_fd};
 use crate::resp::RespParser;
@@ -27,20 +30,11 @@ use crate::cmd_handler::CmdHandler;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parsing args for port
     let args: Vec<String> = env::args().collect();
-    let mut port: u16 = 6379;
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--port" => {
-                port = args[i + 1].parse().unwrap();
-                i += 2;
-            },
-            _ => {}
-        }
-    };
+    Config::init(args);
+    let config = Config::get();
 
     // Fd for listener 
-    let listener = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
+    let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let listener_fd = listener.as_raw_fd();
     let listener_fd_u64 = listener_fd as u64;

@@ -323,10 +323,17 @@ pub enum RespValue {
 }
 
 impl RespValue {
-    pub fn str(&self) -> Option<String> {
+    pub fn str(self) -> Option<String> {
         match self {
-            Self::Str(s) => return Some(s.to_string()),
-            _ => return None
+            Self::Str(s) => Some(s),
+            _ => None
+        }
+    }
+
+    pub fn int(self) -> Option<i64> {
+        match self {
+            Self::Integer(x) => Some(x),
+            _ => None
         }
     }
 }
@@ -452,27 +459,27 @@ impl RespType {
         }
     }
 
-    pub fn get_value(&self) -> Option<RespValue>{
+    pub fn get_value(self) -> Option<RespValue>{
         // Get the inner value of simple type, bulk type, scalar type
         // Destroy the struct in process
         match self {
             Self::SimpleStr(o) => {
                 if let Some(s) = o {
-                    return Some(RespValue::Str(s.to_string()))
+                    return Some(RespValue::Str(s))
                 } else {
                     return None
                 };
             },
             Self::Integer(o) => {
                 if let Some(x) = o {
-                    return Some(RespValue::Integer(*x as i64))
+                    return Some(RespValue::Integer(x as i64))
                 } else {
                     return None
                 };
             },
             Self::BulkStr { value, .. } => {
                 if let Some(s) = value {
-                    return Some(RespValue::Str(s.to_string()));
+                    return Some(RespValue::Str(s));
                 } else {
                     return None
                 }
