@@ -10,7 +10,7 @@ use crate::resp::{ RespType, RespValue };
 use crate::epoll::timer_create_event;
 use crate::cmd_builder::{ Cmd, CmdError, CmdOption, KW_PONG, KW_QUEUED, KW_REPLICATION };
 use crate::utils::now;
-use crate::app_state::AppState;
+use crate::config::Config;
 
 // Stored value types for CmdHandler
 #[derive(Debug)]
@@ -1322,8 +1322,8 @@ impl CmdHandler {
 
     fn cmd_info(&self, key: String) -> Option<RespType> {
         if key.to_uppercase() == KW_REPLICATION {
-            let app_state = AppState::get();
-            let msg = app_state.borrow().get_replication();
+            let config = Config::get();
+            let msg = config.get_info();
             Some(RespType::BulkStr { length: msg.len(), value: Some(msg) })
         } else {
             None
