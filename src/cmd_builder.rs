@@ -10,8 +10,9 @@ use crate::utils::now;
 
 
 // Command Keyword
-const KW_PING: &str = "PING";
+pub const KW_PING: &str = "PING";
 pub const KW_PONG: &str = "PONG";
+pub const KW_OK: &str = "OK";
 const KW_ECHO: &str = "ECHO";
 const KW_SET: &str = "SET";
 const KW_GET: &str = "GET";
@@ -39,6 +40,8 @@ const KW_WATCH: &str = "WATCH";
 const KW_UNWATCH: &str = "UNWATCH";
 const KW_INFO: &str = "INFO";
 pub const KW_REPLICATION: &str = "REPLICATION";
+pub const KW_REPLCONF: &str = "REPLCONF";
+pub const KW_PSYNC: &str = "PSYNC";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -70,9 +73,11 @@ impl std::fmt::Display for CmdError {
 
 
 //-------Command, struct and parser
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Cmd {
-    PING, 
+    PING,
+    PONG,
+    OK,
     ECHO(String),
     SET { key: String, value: String, opt: Option<CmdOption>  },
     GET { key: String },
@@ -93,10 +98,14 @@ pub enum Cmd {
     WATCH(Vec<String>),
     UNWATCH,
     INFO(String),
+    REPLCONF,
+    PSYNC,
 }
 
 impl Cmd {
     fn ping() -> Result<Self, CmdError> { Ok(Self::PING) }
+    fn pong() -> Result<Self, CmdError> { Ok(Self::PONG) }
+    fn ok() -> Result<Self, CmdError> { Ok(Self::OK) }
     fn echo(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
         let s: String = values.pop_front()
             .ok_or(CmdError::MissingArgument(
@@ -512,6 +521,14 @@ impl Cmd {
         Ok(Self::INFO(key))
     }
 
+    pub fn replconf() -> Result<Self, CmdError> {
+        Ok(Self::REPLCONF)
+    }
+
+    pub fn psync() -> Result<Self, CmdError> {
+        Ok(Self::PSYNC)
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -530,7 +547,13 @@ impl Cmd {
 
                                     match value.unwrap().to_uppercase() {
                                         s if s == KW_PING => {
-                                            return Self::ping();
+                                            return Self::ping()
+                                        },
+                                        s if s == KW_PONG => {
+                                            return Self::pong()
+                                        },
+                                        s if s == KW_OK => {
+                                            return Self::ok()
                                         },
                                         s if s == KW_ECHO => {
                                             return Self::echo(v);
@@ -592,6 +615,12 @@ impl Cmd {
                                         s if s == KW_INFO => {
                                             return Self::info(v)
                                         },
+                                        s if s == KW_REPLCONF => {
+                                            return Self::replconf()
+                                        },
+                                        s if s == KW_PSYNC => {
+                                            return Self::psync()
+                                        },
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))
                                     } 
@@ -609,7 +638,7 @@ impl Cmd {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum CmdOption {
     EX(Option<u64>), // expire in x seconds
     PX(Option<u64>), // expire in x miliseconds

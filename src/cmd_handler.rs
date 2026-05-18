@@ -315,6 +315,7 @@ impl CmdHandler {
             Cmd::WATCH(keys) => self.cmd_watch(keys, client_id),
             Cmd::UNWATCH => self.cmd_unwatch(client_id),
             Cmd::INFO(key) => self.cmd_info(key),
+            _ => None
         };
 
         if let Some(resp) = output {

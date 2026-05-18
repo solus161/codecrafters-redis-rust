@@ -2,7 +2,7 @@ use std::fmt::Display;
 use std::sync::OnceLock;
 use std::rc::Rc;
 
-enum Replication {
+pub enum Replication {
     Master{ id: String, offset: u64 },
     Slave{ host: String, port: u16 },
 }
@@ -38,7 +38,7 @@ impl Display for Replication {
 pub struct Config {
     pub host: String,
     pub port: u16,
-    role: Replication,
+    pub role: Replication,
 }
 
 impl Config {

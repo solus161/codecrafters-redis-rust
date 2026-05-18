@@ -1,16 +1,39 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::error;
-use std::io::{self,  Read, Write};
+use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::rc::Rc;
 use std::str::from_utf8;
 
-use crate::cmd_handler::CmdHandler;
-use crate::cmd_builder::Cmd;
+use crate::cmd_handler::CmdHandler; 
+use crate::cmd_builder::{Cmd, KW_PING, KW_PSYNC, KW_REPLCONF};
 use crate::resp::{ RespType, RespParser };
 
+pub enum ClientRole {
+    Master,
+    Slave,
+    None
+}
+
+#[derive(PartialEq)]
+enum HandShakeState {
+    PING,
+    REPLCONF1,
+    REPLCONF2,
+    PSYNC,
+    Established,
+    None,
+}
+
+struct HandShake {
+    request_seq: Vec<String>,
+    response_seq: VecDeque<String>,
+}
+
 pub struct TcpClient {
+    pub role: ClientRole,
+    handshake_state: HandShakeState,
     pub fd_key: u64,
     pub stream: TcpStream,
     pub resp_parser: RespParser,
@@ -21,10 +44,13 @@ pub const BUFFER_SIZE: i32 = 4096;
 
 impl TcpClient {
     pub fn new(
+        role: Option<ClientRole>,
         fd_key: u64,
         stream: TcpStream, 
         cmd_handler: Rc<RefCell<CmdHandler>>) -> Self {
         Self {
+            role: role.unwrap_or(ClientRole::None),
+            handshake_state: HandShakeState::None,
             fd_key: fd_key,
             stream: stream,
             resp_parser: RespParser::new(),
@@ -58,7 +84,43 @@ impl TcpClient {
                 Some(t) => {
                     let cmd = Cmd::from_resp(t);
                     println!("Cmd completed: {:?}", &cmd);
-                    if let Some(r) = self.cmd_handler.borrow_mut().handle(cmd, self.fd_key) {
+                    let mut response: Option<String> = None;
+                    
+                    match cmd {
+                        Ok(c) => {
+                            // Establishing handshake
+                            match self.handshake_state {
+                                HandShakeState::PING if c == Cmd::PONG => {
+                                    self.handshake_state = HandShakeState::REPLCONF1;
+                                    response = self.get_replconf1();
+                                },
+                                HandShakeState::REPLCONF1 if c == Cmd::OK => {
+                                    self.handshake_state = HandShakeState::REPLCONF2;
+                                    response = self.get_replconf2();
+                                },
+                                HandShakeState::REPLCONF2 if c == Cmd::OK => {
+                                    self.handshake_state = HandShakeState::PSYNC;
+                                    response = self.get_psync();
+                                },
+                                HandShakeState::REPLCONF2 if c == Cmd::OK => {
+                                    self.handshake_state = HandShakeState::REPLCONF2;
+                                    response = self.get_replconf2();
+                                },
+                                HandShakeState::PSYNC => {
+                                    self.handshake_state = HandShakeState::Established
+                                },
+                                HandShakeState::Established => {},
+                                HandShakeState::None => {
+                                    // Not a slave node
+                                    response = self.cmd_handler.borrow_mut().handle(Ok(c), self.fd_key)
+                                },
+                                _ => {}
+                            };
+                        },
+                        Err(_) => {}
+                    };
+                    
+                    if let Some(r) = response { 
                         self.stream.write_all(r.as_bytes())?;
                     }
                 },
@@ -66,5 +128,34 @@ impl TcpClient {
             }
         };
         Ok(())
+    }
+
+    pub fn init_handshake(&mut self) {
+        self.handshake_state = HandShakeState::PING;
+        let mut arr = RespType::Array { length: 1, value: None};
+        let ping = RespType::BulkStr { length: KW_PING.len(), value: Some(KW_PING.to_string()) };
+        arr.add_item(ping);
+        let _ = self.stream.write_all(arr.serialize().unwrap().as_bytes());
+    }
+
+    fn get_replconf1(&self) -> Option<String> {
+        let mut arr = RespType::Array { length: 1, value: None }; 
+        let replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
+        arr.add_item(replconf);
+        arr.serialize()
+    }
+
+    fn get_replconf2(&self) -> Option<String> {
+        let mut arr = RespType::Array { length: 1, value: None }; 
+        let replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
+        arr.add_item(replconf);
+        arr.serialize()
+    }
+
+    fn get_psync(&self) -> Option<String> {
+        let mut arr = RespType::Array { length: 1, value: None }; 
+        let replconf = RespType::BulkStr { length: KW_PSYNC.len(), value: Some(KW_REPLCONF.to_string()) };
+        arr.add_item(replconf);
+        arr.serialize()
     }
 }

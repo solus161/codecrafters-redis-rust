@@ -10,8 +10,8 @@ use std::rc::Rc;
 use std::str::from_utf8;
 use libc;
 
+// mod app_state;
 mod config;
-mod app_state;
 #[macro_use]
 mod utils;
 mod epoll;
@@ -21,8 +21,8 @@ mod client;
 mod resp;
 mod tests;
 
-use crate::config::Config;
-use crate::client::{TcpClient, BUFFER_SIZE};
+use crate::config::{Config, Replication};
+use crate::client::{TcpClient, ClientRole, BUFFER_SIZE};
 use crate::epoll::{get_epoll_event_read, timer_create_event, timer_create_fd};
 use crate::resp::RespParser;
 use crate::cmd_handler::CmdHandler;
@@ -33,12 +33,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Config::init(args);
     let config = Config::get();
 
+    // Fd for master, replica #[cfg(test)]
+    // let mut master: Option<TcpStream> = None;
+
     // Fd for listener 
     let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let listener_fd = listener.as_raw_fd();
     let listener_fd_u64 = listener_fd as u64;
     
+    // To store all clients or a master
+    let mut clients: HashMap<u64, TcpClient> = HashMap::new();
+
     // Fd for timer
     let timer_fd = timer_create_fd();
 
@@ -46,7 +52,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Get fd on epoll event
     let epoll_fd = epoll::epoll_create().expect("Error creating epoll queue");
-    
+
+    // Add a master if in slave #[cfg(test)]
+    match &config.role {
+        Replication::Master { .. } => {},
+        Replication::Slave { host, port } => {
+            // Connect to master
+            let master = TcpStream::connect(format!("{}:{}", host, port))
+                .expect("Cannot connect to master");
+            let master_fd = master.as_raw_fd();
+
+            epoll::add_interest(
+                epoll_fd, master.as_raw_fd(), 
+                epoll::get_epoll_event_read(master_fd.try_into().unwrap()))?;
+
+            // Put master to the client table
+            let mut client_master = TcpClient::new(
+                    Some(ClientRole::Master), 
+                    master_fd.try_into().unwrap(),
+                    master,
+                    Rc::clone(&cmd_handler));
+
+            // Initiate handshake
+            client_master.init_handshake();
+            clients.insert(
+                master_fd.try_into().unwrap(),
+                client_master
+                );
+        }
+    };
+
     // Add listener to epoll for changes
     epoll::add_interest(epoll_fd, listener_fd, epoll::get_epoll_event_read(listener_fd_u64))?;
     
@@ -54,7 +89,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     epoll::add_interest(epoll_fd, timer_fd, epoll::get_epoll_event_read(timer_fd as u64))?;
 
     let mut events: Vec<libc::epoll_event> = Vec::with_capacity(BUFFER_SIZE as usize);
-    let mut clients: HashMap<u64, TcpClient> = HashMap::new();
 
     loop {
         events.clear();
@@ -93,6 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             clients.insert(
                                 stream_key.try_into().unwrap(),
                                 TcpClient::new(
+                                    Some(ClientRole::None),
                                     stream_key.try_into().unwrap(),
                                     stream, 
                                     Rc::clone(&cmd_handler)));
