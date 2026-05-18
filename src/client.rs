@@ -6,8 +6,9 @@ use std::net::TcpStream;
 use std::rc::Rc;
 use std::str::from_utf8;
 
+use crate::config::{self, Config, Replication};
 use crate::cmd_handler::CmdHandler; 
-use crate::cmd_builder::{Cmd, KW_PING, KW_PSYNC, KW_REPLCONF};
+use crate::cmd_builder::{Cmd, KW_CAPA, KW_LISTENING_PORT, KW_PING, KW_PSYNC, KW_REPLCONF};
 use crate::resp::{ RespType, RespParser };
 
 pub enum ClientRole {
@@ -139,16 +140,27 @@ impl TcpClient {
     }
 
     fn get_replconf1(&self) -> Option<String> {
-        let mut arr = RespType::Array { length: 1, value: None }; 
-        let replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
-        arr.add_item(replconf);
+        // Return RESP bytes representing: REPLCONF listening-port <PORT>
+        let mut arr = RespType::Array { length: 3, value: None }; 
+        let resp_replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
+        let resp_listening = RespType::BulkStr { length: KW_LISTENING_PORT.len(), value: Some(KW_LISTENING_PORT.to_string()) };
+        let port: String = Config::get().port.to_string();
+        let resp_port = RespType::BulkStr { length: port.len(), value: Some(port) };
+        arr.add_item(resp_replconf);
+        arr.add_item(resp_listening);
+        arr.add_item(resp_port);
         arr.serialize()
     }
 
     fn get_replconf2(&self) -> Option<String> {
-        let mut arr = RespType::Array { length: 1, value: None }; 
+        let mut arr = RespType::Array { length: 3, value: None }; 
         let replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
+        let resp_capa = RespType::BulkStr { length: KW_CAPA.len(), value: Some(KW_CAPA.to_string()) };
+        let psync2 = "psync2";
+        let resp_psync = RespType::BulkStr { length: psync2.len(), value: Some(psync2.to_string()) };
         arr.add_item(replconf);
+        arr.add_item(resp_capa);
+        arr.add_item(resp_psync);
         arr.serialize()
     }
 

@@ -42,6 +42,8 @@ const KW_INFO: &str = "INFO";
 pub const KW_REPLICATION: &str = "REPLICATION";
 pub const KW_REPLCONF: &str = "REPLCONF";
 pub const KW_PSYNC: &str = "PSYNC";
+pub const KW_LISTENING_PORT: &str = "listening-port";
+pub const KW_CAPA: &str = "capa";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -549,12 +551,7 @@ impl Cmd {
                                         s if s == KW_PING => {
                                             return Self::ping()
                                         },
-                                        s if s == KW_PONG => {
-                                            return Self::pong()
-                                        },
-                                        s if s == KW_OK => {
-                                            return Self::ok()
-                                        },
+                                        
                                         s if s == KW_ECHO => {
                                             return Self::echo(v);
                                         },
@@ -633,6 +630,18 @@ impl Cmd {
                 };
                 return Err(CmdError::NoCmdError);
             },
+            RespType::SimpleStr(o) => {
+                match o.unwrap().to_uppercase() {
+                    s if s == KW_PONG => {
+                        return Self::pong()
+                    },
+                    s if s == KW_OK => {
+                        return Self::ok()
+                    },
+                    _ => return Err(
+                        CmdError::InvalidArgument("Invalid command".to_string()))
+                }
+            }
             _ => return Err(CmdError::UnsupportedCmdStructure),
         }
     }
