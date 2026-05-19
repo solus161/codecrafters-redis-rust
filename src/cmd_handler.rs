@@ -8,9 +8,9 @@ use libc::{key_t, write};
 
 use crate::resp::{ RespType, RespValue };
 use crate::epoll::timer_create_event;
-use crate::cmd_builder::{ Cmd, CmdError, CmdArg, KW_PONG, KW_QUEUED, KW_REPLICATION };
+use crate::cmd_builder::{ Cmd, CmdError, CmdArg, KW_PONG, KW_QUEUED, KW_REPLICATION, KW_FULLRESYNC };
 use crate::utils::now;
-use crate::config::Config;
+use crate::config::{self, Config};
 
 // Stored value types for CmdHandler
 #[derive(Debug)]
@@ -314,7 +314,8 @@ impl CmdHandler {
             Cmd::DISCARD => self.cmd_discard(client_id),
             Cmd::WATCH(keys) => self.cmd_watch(keys, client_id),
             Cmd::UNWATCH => self.cmd_unwatch(client_id),
-            Cmd::INFO(key) => self.cmd_info(key),
+            Cmd::INFO(key) => Self::cmd_info(key),
+            Cmd::PSYNC { id, offset } => Self::cmd_psync(id, offset),
             _ => None
         };
 
@@ -1322,11 +1323,26 @@ impl CmdHandler {
         Self::response_ok()
     }
 
-    fn cmd_info(&self, key: String) -> Option<RespType> {
+    fn cmd_info(key: String) -> Option<RespType> {
         if key.to_uppercase() == KW_REPLICATION {
             let config = Config::get();
             let msg = config.get_info();
             Some(RespType::BulkStr { length: msg.len(), value: Some(msg) })
+        } else {
+            None
+        }
+    }
+
+    fn cmd_psync(id: String, offset: i64) -> Option<RespType> {
+        if id == "?" {
+            let config = Config::get();
+            match &config.role {
+                config::Replication::Master { id, offset } => {
+                    let msg = format!("{} {} {}", &KW_FULLRESYNC, id, offset);
+                    Some(RespType::SimpleStr(Some(msg)))
+                },
+                _ => None
+            }
         } else {
             None
         }

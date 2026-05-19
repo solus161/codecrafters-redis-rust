@@ -148,7 +148,7 @@ pub enum Cmd {
     UNWATCH,
     INFO(String),
     REPLCONF(CmdArg),
-    PSYNC,
+    PSYNC{ id: String, offset: i64},
     FULLRESYNC { id: String, offset: i64},
 }
 
@@ -579,8 +579,17 @@ impl Cmd {
         Ok(Self::REPLCONF(opt))
     }
 
-    pub fn psync() -> Result<Self, CmdError> {
-        Ok(Self::PSYNC)
+    pub fn psync(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let id: String = values.pop_front()
+           .ok_or(CmdError::MissingArgument("No id provided for PSYNC".to_string()))?
+           .get_value().unwrap().str().unwrap();
+        
+        let offset: i64 = values.pop_front()
+           .ok_or(CmdError::MissingArgument("No offset provided for PSYNC".to_string()))?
+           .get_value().unwrap().str().unwrap()
+           .parse().map_err(|_| CmdError::ParseError("offset for PSYNC".to_string()))?;
+        
+        Ok(Self::PSYNC{ id, offset })
     }
 
     pub fn fullresync(s: String) -> Result<Self, CmdError> {
@@ -681,7 +690,7 @@ impl Cmd {
                                             return Self::replconf(v)
                                         },
                                         s if s == KW_PSYNC => {
-                                            return Self::psync()
+                                            return Self::psync(v)
                                         },
                                         
                                         _ => return Err(
