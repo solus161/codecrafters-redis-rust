@@ -44,6 +44,7 @@ pub const KW_REPLCONF: &str = "REPLCONF";
 pub const KW_PSYNC: &str = "PSYNC";
 pub const KW_LISTENING_PORT: &str = "listening-port";
 pub const KW_CAPA: &str = "capa";
+pub const KW_FULLRESYNC: &str = "FULLRESYNC";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -102,6 +103,7 @@ pub enum Cmd {
     INFO(String),
     REPLCONF,
     PSYNC,
+    FULLRESYNC { id: String, offset: i64},
 }
 
 impl Cmd {
@@ -531,6 +533,20 @@ impl Cmd {
         Ok(Self::PSYNC)
     }
 
+    pub fn fullresync(s: String) -> Result<Self, CmdError> {
+        let mut s_iter = s.split(" "); 
+        s_iter.next();
+        let id: String = s_iter.next()
+           .ok_or(CmdError::MissingArgument("No id provided for FULLRESYNC".to_string()))?
+           .to_string();
+        
+        let offset: i64 = s_iter.next()
+           .ok_or(CmdError::MissingArgument("No offset provided for FULLRESYNC".to_string()))?
+           .parse().map_err(|_| CmdError::ParseError("offset for FULLRESYNC".to_string()))?;
+
+        Ok(Self::FULLRESYNC { id, offset })
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -551,7 +567,6 @@ impl Cmd {
                                         s if s == KW_PING => {
                                             return Self::ping()
                                         },
-                                        
                                         s if s == KW_ECHO => {
                                             return Self::echo(v);
                                         },
@@ -618,6 +633,7 @@ impl Cmd {
                                         s if s == KW_PSYNC => {
                                             return Self::psync()
                                         },
+                                        
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))
                                     } 
@@ -638,6 +654,9 @@ impl Cmd {
                     s if s == KW_OK => {
                         return Self::ok()
                     },
+                    s if s[..10] == *KW_FULLRESYNC => {
+                            return Self::fullresync(s)
+                        },
                     _ => return Err(
                         CmdError::InvalidArgument("Invalid command".to_string()))
                 }

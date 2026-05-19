@@ -62,7 +62,8 @@ impl TcpClient {
             Ok(n) => n,
             Err(e) => return Err(e.into()),
         };
-        println!("Socket buf read: {:?}", from_utf8(&tmp_buf[..n]).unwrap());
+        // println!("{:?}", &tmp_buf[..n]);
+        // println!("Socket buf read: {:?}", from_utf8(&tmp_buf[..n]).unwrap());
 
         // Push tmp_buf into current buf
         //println!("Current buf before append: {:?}", &self.buf);

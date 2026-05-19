@@ -22,7 +22,7 @@ mod resp;
 mod tests;
 
 use crate::config::{Config, Replication};
-use crate::client::{TcpClient, ClientRole, BUFFER_SIZE};
+use crate::client::{TcpClient, BUFFER_SIZE};
 use crate::epoll::{get_epoll_event_read, timer_create_event, timer_create_fd};
 use crate::resp::RespParser;
 use crate::cmd_handler::CmdHandler;
@@ -68,7 +68,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Put master to the client table
             let mut client_master = TcpClient::new(
-                    Some(ClientRole::Master), 
                     master_fd.try_into().unwrap(),
                     master,
                     Rc::clone(&cmd_handler));
@@ -127,7 +126,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             clients.insert(
                                 stream_key.try_into().unwrap(),
                                 TcpClient::new(
-                                    Some(ClientRole::None),
                                     stream_key.try_into().unwrap(),
                                     stream, 
                                     Rc::clone(&cmd_handler)));
