@@ -8,7 +8,7 @@ use libc::{key_t, write};
 
 use crate::resp::{ RespType, RespValue };
 use crate::epoll::timer_create_event;
-use crate::cmd_builder::{ Cmd, CmdError, CmdOption, KW_PONG, KW_QUEUED, KW_REPLICATION };
+use crate::cmd_builder::{ Cmd, CmdError, CmdArg, KW_PONG, KW_QUEUED, KW_REPLICATION };
 use crate::utils::now;
 use crate::config::Config;
 
@@ -367,13 +367,14 @@ impl CmdHandler {
         } 
     }
 
-    fn extract_deadline(opt: Option<CmdOption>) -> Option<u64> {
+    fn extract_deadline(opt: Option<CmdArg>) -> Option<u64> {
         match opt {
             Some(arg) => {
                 let now = now(); 
                 match arg {
-                    CmdOption::EX(x) => Some(now / 1000 + x.unwrap()),
-                    CmdOption::PX(x) => Some(now + x.unwrap()),
+                    CmdArg::EX(x) => Some(now / 1000 + x.unwrap()),
+                    CmdArg::PX(x) => Some(now + x.unwrap()),
+                    _ => None,
                 }
             },
             None => None
@@ -411,7 +412,7 @@ impl CmdHandler {
         };
     }
 
-    fn response_ok() -> Option<RespType> {
+    pub fn response_ok() -> Option<RespType> {
         Some(RespType::SimpleStr(Some("OK".to_string())))
     }
     
@@ -512,7 +513,7 @@ impl CmdHandler {
         RespType::SimpleStr(Some(s)).serialize()
     }
 
-    fn cmd_set(&mut self, key: String, value: String, opt: Option<CmdOption>) -> Option<RespType> {
+    fn cmd_set(&mut self, key: String, value: String, opt: Option<CmdArg>) -> Option<RespType> {
         // Extract cmd for handling instruction
         let exp = Self::extract_deadline(opt); 
         self.data.insert(key, StoreItem {

@@ -1,9 +1,32 @@
 use std::fmt::Display;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::OnceLock;
 use std::rc::Rc;
 
+pub struct AtomicOffset(AtomicI64);
+
+impl AtomicOffset {
+    pub fn new(v: i64) -> Self {
+        Self(AtomicI64::new(v))
+    }
+
+    pub fn load(&self) -> i64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    pub fn add(&mut self, v: i64) -> i64{
+        self.0.fetch_add(v, Ordering::Relaxed)
+    }
+}
+
+impl Display for AtomicOffset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.load()) 
+    }
+}
+
 pub enum Replication {
-    Master{ id: String, offset: u64 },
+    Master{ id: String, offset: AtomicOffset },
     Slave{ host: String, port: u16 },
 }
 
@@ -12,7 +35,7 @@ impl Replication {
         match s {
             None => Self::Master{
                 id: "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_string(),
-                offset: 0
+                offset: AtomicOffset::new(0),
             },
             Some(s) => {
                 let mut splitted = s.split(" ");

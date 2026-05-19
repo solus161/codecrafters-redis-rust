@@ -45,6 +45,8 @@ pub const KW_PSYNC: &str = "PSYNC";
 pub const KW_LISTENING_PORT: &str = "listening-port";
 pub const KW_CAPA: &str = "capa";
 pub const KW_FULLRESYNC: &str = "FULLRESYNC";
+const KW_GETACK: &str = "GETACK";
+const KW_ACK: &str = "ACK";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -74,6 +76,50 @@ impl std::fmt::Display for CmdError {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub enum CmdArg {
+    // This is used when a arg placeholder could have different args of same types
+    EX(Option<u64>), // expire in x seconds
+    PX(Option<u64>), // expire in x miliseconds
+    ListeningPort(u16),
+    Capa(String),
+    GETACK(String),
+    ACK(i64),
+}
+
+impl CmdArg {
+    fn set(key: String, value: String) -> Result<Self, CmdError> {
+        match key {
+            k if k == KW_EX => {
+                let x = value.parse::<u64>()
+                    .map_err(|_| CmdError::ParseError("expiration value".to_string()))?;
+                Ok(Self::EX(Some(x)))
+            },
+            k if k == KW_PX => {
+                let x = value.parse::<u64>()
+                    .map_err(|_| CmdError::ParseError("expiration value".to_string()))?;
+                Ok(Self::PX(Some(x)))
+            },
+            k if k == KW_LISTENING_PORT => {
+                let x = value.parse::<u16>()
+                    .map_err(|_| CmdError::ParseError("expiration value".to_string()))?;
+                Ok(Self::ListeningPort(x))
+            },
+            k if k == KW_CAPA => {
+                Ok(Self::Capa(value))
+            },
+            k if k == KW_GETACK => {
+                Ok(Self::GETACK(value))
+            },
+            k if k == KW_ACK => {
+                let x = value.parse::<i64>()
+                    .map_err(|_| CmdError::ParseError("expiration value".to_string()))?;
+                Ok(Self::ACK(x))
+            },
+            _ => Err(CmdError::InvalidArgument(format!("Invalid arg for {}", &key))),
+        }
+    }
+}
 
 //-------Command, struct and parser
 #[derive(Debug, PartialEq)]
@@ -82,7 +128,7 @@ pub enum Cmd {
     PONG,
     OK,
     ECHO(String),
-    SET { key: String, value: String, opt: Option<CmdOption>  },
+    SET { key: String, value: String, opt: Option<CmdArg>  },
     GET { key: String },
     RPUSH { key: String, value: Vec<String> },
     LRANGE{ key: String, start: i64, stop: i64},
@@ -101,7 +147,7 @@ pub enum Cmd {
     WATCH(Vec<String>),
     UNWATCH,
     INFO(String),
-    REPLCONF,
+    REPLCONF(CmdArg),
     PSYNC,
     FULLRESYNC { id: String, offset: i64},
 }
@@ -136,17 +182,14 @@ impl Cmd {
             // Having option
             Some(o) => {
                 let expire_key: String = o.get_value().unwrap().str().unwrap();        
-                let expire_value: u64 = match values.pop_front() {
+                let expire_value: String = match values.pop_front() {
                     Some(o) => {
                         // TODO: handle conversion error
-                        o.get_value().unwrap().str().unwrap()
-                            .parse::<u64>()
-                            .map_err(|_| CmdError::ParseError("expiration value".to_string()))?
+                        o.get_value().unwrap().str().unwrap() 
                     },
                     None => return Err(CmdError::MissingArgument("No expiration provided".to_string()))
                 };
-                let opt = CmdOption::set(expire_key, expire_value)
-                    .ok_or(CmdError::ParseIntError("SET".to_string()))?;
+                let opt = CmdArg::set(expire_key, expire_value)?;
                 Ok(Self::SET{ key: key, value: value, opt: Some(opt) })
             },
             // Have no option
@@ -525,8 +568,15 @@ impl Cmd {
         Ok(Self::INFO(key))
     }
 
-    pub fn replconf() -> Result<Self, CmdError> {
-        Ok(Self::REPLCONF)
+    pub fn replconf(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let arg: String = values.pop_front()
+           .ok_or(CmdError::MissingArgument("No key provided for REPLCONF".to_string()))?
+           .get_value().unwrap().str().unwrap();
+        let value: String = values.pop_front()
+           .ok_or(CmdError::MissingArgument("No value provided for REPLCONF".to_string()))?
+           .get_value().unwrap().str().unwrap();
+        let opt = CmdArg::set(arg, value)?;
+        Ok(Self::REPLCONF(opt))
     }
 
     pub fn psync() -> Result<Self, CmdError> {
@@ -628,7 +678,7 @@ impl Cmd {
                                             return Self::info(v)
                                         },
                                         s if s == KW_REPLCONF => {
-                                            return Self::replconf()
+                                            return Self::replconf(v)
                                         },
                                         s if s == KW_PSYNC => {
                                             return Self::psync()
@@ -666,25 +716,4 @@ impl Cmd {
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub enum CmdOption {
-    EX(Option<u64>), // expire in x seconds
-    PX(Option<u64>), // expire in x miliseconds
-}
 
-impl CmdOption {
-    fn set(key: String, value: u64) -> Option<Self> {
-        match Self::match_key(key)? {
-            Self::EX(_) => Some(Self::EX(Some(value))),
-            Self::PX(_) => Some(Self::PX(Some(value))),
-        }
-    }
-
-    fn match_key(key: String) -> Option<Self> {
-        match key.to_uppercase() {
-            k if k == KW_EX => Some(Self::EX(None)),
-            k if k == KW_PX => Some(Self::PX(None)),
-            _ => return None
-        }
-    } 
-}

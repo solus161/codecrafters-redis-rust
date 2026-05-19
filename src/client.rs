@@ -8,7 +8,7 @@ use std::str::from_utf8;
 
 use crate::config::{self, Config, Replication};
 use crate::cmd_handler::CmdHandler; 
-use crate::cmd_builder::{Cmd, KW_CAPA, KW_LISTENING_PORT, KW_PING, KW_PSYNC, KW_REPLCONF};
+use crate::cmd_builder::{Cmd, CmdArg, KW_CAPA, KW_LISTENING_PORT, KW_PING, KW_PSYNC, KW_REPLCONF};
 use crate::resp::{ RespType, RespParser };
 
 #[derive(PartialEq)]
@@ -22,8 +22,10 @@ enum HandShakeState {
 }
 
 struct ReplState {
-    id: String,
-    offset: i64,
+    pub port: Option<u16>,
+    pub capa: Option<String>,
+    pub id: String,
+    pub offset: i64,
 }
 
 pub struct TcpClient {
@@ -48,7 +50,8 @@ impl TcpClient {
             resp_parser: RespParser::new(),
             cmd_handler: cmd_handler,
             handshake_state: HandShakeState::None,
-            repl_state: ReplState { id: "?".to_string(), offset: -1 },
+            repl_state: ReplState {
+                port: None, capa: None, id: "?".to_string(), offset: -1 },
         }
     }
 
@@ -85,19 +88,20 @@ impl TcpClient {
                         Ok(c) => {
                             // Establishing handshake
                             match self.handshake_state {
-                                HandShakeState::PING if c == Cmd::PONG => {
+                                // Client establishing handshake
+                                HandShakeState::PING if matches!(c, Cmd::PONG) => {
                                     self.handshake_state = HandShakeState::REPLCONF1;
                                     response = self.get_replconf1();
                                 },
-                                HandShakeState::REPLCONF1 if c == Cmd::OK => {
+                                HandShakeState::REPLCONF1 if matches!(c, Cmd::OK) => {
                                     self.handshake_state = HandShakeState::REPLCONF2;
                                     response = self.get_replconf2();
                                 },
-                                HandShakeState::REPLCONF2 if c == Cmd::OK => {
+                                HandShakeState::REPLCONF2 if matches!(c, Cmd::OK) => {
                                     self.handshake_state = HandShakeState::PSYNC;
                                     response = self.get_psync();
                                 },
-                                HandShakeState::REPLCONF2 if c == Cmd::OK => {
+                                HandShakeState::REPLCONF2 if matches!(c, Cmd::OK) => {
                                     self.handshake_state = HandShakeState::REPLCONF2;
                                     response = self.get_replconf2();
                                 },
@@ -105,10 +109,23 @@ impl TcpClient {
                                     self.handshake_state = HandShakeState::Established
                                 },
                                 HandShakeState::Established => {},
-                                HandShakeState::None => {
-                                    // Not a slave node
-                                    response = self.cmd_handler.borrow_mut().handle(Ok(c), self.fd_key)
-                                },
+                                // Master received handshake request
+                                HandShakeState::None  => {
+                                    match c {
+                                        Cmd::REPLCONF(CmdArg::ListeningPort(x)) => {
+                                            self.repl_state.port = Some(x);
+                                            response = CmdHandler::response_ok().unwrap().serialize();
+                                        },
+                                        Cmd::REPLCONF(CmdArg::Capa(s)) => {
+                                            self.repl_state.capa = Some(s);
+                                            response = CmdHandler::response_ok().unwrap().serialize();
+                                        },
+                                        _ => {
+                                            // Neither a slave not a master
+                                            response = self.cmd_handler.borrow_mut().handle(Ok(c), self.fd_key)
+                                        }
+                                    }
+                                }
                                 _ => {}
                             };
                         },
