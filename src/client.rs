@@ -11,12 +11,6 @@ use crate::cmd_handler::CmdHandler;
 use crate::cmd_builder::{Cmd, KW_CAPA, KW_LISTENING_PORT, KW_PING, KW_PSYNC, KW_REPLCONF};
 use crate::resp::{ RespType, RespParser };
 
-pub enum ClientRole {
-    Master,
-    Slave,
-    None
-}
-
 #[derive(PartialEq)]
 enum HandShakeState {
     PING,
@@ -27,35 +21,34 @@ enum HandShakeState {
     None,
 }
 
-struct HandShake {
-    request_seq: Vec<String>,
-    response_seq: VecDeque<String>,
+struct ReplState {
+    id: String,
+    offset: i64,
 }
 
 pub struct TcpClient {
-    pub role: ClientRole,
-    handshake_state: HandShakeState,
     pub fd_key: u64,
     pub stream: TcpStream,
     pub resp_parser: RespParser,
     pub cmd_handler: Rc<RefCell<CmdHandler>>,
+    handshake_state: HandShakeState,
+    repl_state: ReplState,
 }
 
 pub const BUFFER_SIZE: i32 = 4096;
 
 impl TcpClient {
     pub fn new(
-        role: Option<ClientRole>,
         fd_key: u64,
         stream: TcpStream, 
         cmd_handler: Rc<RefCell<CmdHandler>>) -> Self {
         Self {
-            role: role.unwrap_or(ClientRole::None),
-            handshake_state: HandShakeState::None,
             fd_key: fd_key,
             stream: stream,
             resp_parser: RespParser::new(),
             cmd_handler: cmd_handler,
+            handshake_state: HandShakeState::None,
+            repl_state: ReplState { id: "?".to_string(), offset: -1 },
         }
     }
 
@@ -154,20 +147,29 @@ impl TcpClient {
 
     fn get_replconf2(&self) -> Option<String> {
         let mut arr = RespType::Array { length: 3, value: None }; 
-        let replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
+        let resp_replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
         let resp_capa = RespType::BulkStr { length: KW_CAPA.len(), value: Some(KW_CAPA.to_string()) };
         let psync2 = "psync2";
         let resp_psync = RespType::BulkStr { length: psync2.len(), value: Some(psync2.to_string()) };
-        arr.add_item(replconf);
+        arr.add_item(resp_replconf);
         arr.add_item(resp_capa);
         arr.add_item(resp_psync);
         arr.serialize()
     }
 
     fn get_psync(&self) -> Option<String> {
-        let mut arr = RespType::Array { length: 1, value: None }; 
-        let replconf = RespType::BulkStr { length: KW_PSYNC.len(), value: Some(KW_REPLCONF.to_string()) };
-        arr.add_item(replconf);
+        let mut arr = RespType::Array { length: 3, value: None }; 
+        let resp_psync = RespType::BulkStr { length: KW_PSYNC.len(), value: Some(KW_PSYNC.to_string()) };
+        let resp_id = RespType::BulkStr { 
+            length: self.repl_state.id.len(),
+            value: Some(self.repl_state.id.clone()) };
+        let offset = self.repl_state.offset.to_string();
+        let resp_offset = RespType::BulkStr { 
+            length: offset.len(),
+            value: Some(offset) };
+        arr.add_item(resp_psync);
+        arr.add_item(resp_id);
+        arr.add_item(resp_offset);
         arr.serialize()
     }
 }
