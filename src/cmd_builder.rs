@@ -150,6 +150,7 @@ pub enum Cmd {
     REPLCONF(CmdArg),
     PSYNC{ id: String, offset: i64},
     FULLRESYNC { id: String, offset: i64},
+    RDB(Vec<u8>),
 }
 
 impl Cmd {
@@ -606,6 +607,13 @@ impl Cmd {
         Ok(Self::FULLRESYNC { id, offset })
     }
 
+    pub fn rdb(v: Option<Vec<u8>>) -> Result<Self, CmdError> {
+        match v {
+            Some(b) => Ok(Self::RDB(b)),
+            None => Err(CmdError::UnprocessableError("RBD stream is empty".to_string()))
+        }
+    } 
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -719,7 +727,8 @@ impl Cmd {
                     _ => return Err(
                         CmdError::InvalidArgument("Invalid command".to_string()))
                 }
-            }
+            },
+            RespType::RDB(o) => Self::rdb(o),
             _ => return Err(CmdError::UnsupportedCmdStructure),
         }
     }

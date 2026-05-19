@@ -57,6 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match &config.role {
         Replication::Master { .. } => {},
         Replication::Slave { host, port } => {
+            println!("Run as replica");
             // Connect to master
             let master = TcpStream::connect(format!("{}:{}", host, port))
                 .expect("Cannot connect to master");
@@ -155,7 +156,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut disconnected = false;
                         // Bit mask of event type of an epoll event
                         let events: u32 = ev.events;
-                        println!("epoll event key {} triggered", key);
                         match events {
                             v if v as i32 & libc::EPOLLIN == libc::EPOLLIN => {
                                 match client.read_socket() {
@@ -203,7 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for res in cmd_handler.borrow_mut().response_queue.drain(..) { 
             let (client_id, message) = res;
             let _ = clients.get_mut(&client_id).unwrap()
-                .stream.write_all(message.as_bytes());
+                .stream.write_all(&message);
         };
     }
 }

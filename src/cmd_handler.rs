@@ -6,6 +6,8 @@ use std::string::ParseError;
 
 use libc::{key_t, write};
 
+use base64::{Engine, engine::general_purpose::STANDARD};
+
 use crate::resp::{ RespType, RespValue };
 use crate::epoll::timer_create_event;
 use crate::cmd_builder::{ Cmd, CmdError, CmdArg, KW_PONG, KW_QUEUED, KW_REPLICATION, KW_FULLRESYNC };
@@ -250,7 +252,7 @@ impl RequestRegistry {
 //---------Command handler, convert Cmd struct into action
 enum CmdOutput {
     Resp(RespType),
-    Str(String),
+    Bytes(Vec<u8>),
     None,
 }
 
@@ -262,9 +264,9 @@ impl CmdOutput{
         }
     }
 
-    pub fn extract_str(self) -> Option<String> {
+    pub fn extract_bytes(self) -> Option<Vec<u8>> {
         match self {
-            Self::Str(s) => Some(s),
+            Self::Bytes(v) => Some(v),
             _ => None
         }
     }
@@ -272,7 +274,7 @@ impl CmdOutput{
 
 pub struct CmdHandler {
     // client_id, message
-    pub response_queue: Vec<(u64, String)>,
+    pub response_queue: Vec<(u64, Vec<u8>)>,
     data: HashMap<String, StoreItem>,
     registry: RequestRegistry,
  }
@@ -294,6 +296,8 @@ impl CmdHandler {
 
         let output: Option<RespType> = match cmd {
             Cmd::PING => Self::cmd_ping(),
+            Cmd::PONG => None, // handle at client level when handshaking
+            Cmd::OK => None,
             Cmd::ECHO(s) => Self::cmd_echo(s),
             Cmd::SET{ key, value, opt } => self.cmd_set(key, value, opt),
             Cmd::GET{ key } => self.cmd_get(key),
@@ -315,13 +319,16 @@ impl CmdHandler {
             Cmd::WATCH(keys) => self.cmd_watch(keys, client_id),
             Cmd::UNWATCH => self.cmd_unwatch(client_id),
             Cmd::INFO(key) => Self::cmd_info(key),
-            Cmd::PSYNC { id, offset } => Self::cmd_psync(id, offset),
-            _ => None
+            Cmd::PSYNC { id, offset } => self.cmd_psync(id, offset, client_id),
+            Cmd::REPLCONF(_) => Self::cmd_replconf(),
+            Cmd::FULLRESYNC { .. } => None,
+            Cmd::RDB(_) => None, // client level
+            // _ => None
         };
 
         if let Some(resp) = output {
             if serialized {
-                CmdOutput::Str(resp.serialize().unwrap())
+                CmdOutput::Bytes(resp.to_bytes().unwrap())
             } else {
                 CmdOutput::Resp(resp)
             }
@@ -330,35 +337,35 @@ impl CmdHandler {
         }
     }
 
-    pub fn handle(&mut self, cmd: Result<Cmd, CmdError>, client_id: u64) -> Option<String> {
+    pub fn handle(&mut self, cmd: Result<Cmd, CmdError>, client_id: u64) -> Option<Vec<u8>> {
         match cmd {
             Ok(c) => {
                 if !self.registry.backlog_txn.contains_key(&client_id) {
-                    self._execute_cmd(c, client_id, true).extract_str() 
+                    self._execute_cmd(c, client_id, true).extract_bytes() 
                 } else {
                     match c {
                         Cmd::EXEC => {
                             // Execute transaction
                             match self.cmd_exec(client_id) {
-                                Some(resp) => resp.serialize(),
+                                Some(resp) => resp.to_bytes(),
                                 None => None,
                             }
                         },
                         Cmd::DISCARD => {
                             match self.cmd_discard(client_id) {
-                                Some(resp) => resp.serialize(),
+                                Some(resp) => resp.to_bytes(),
                                 None => None,
                             }
                         },
                         Cmd::WATCH(_) => {
                             RespType::Error(Some(
                                 "ERR WATCH inside MULTI is not allowed".to_string()))
-                                .serialize()
+                                .to_bytes()
                         }
                         _ => {
                             // Building a transaction
                             self.registry.add_to_txn(client_id, c);
-                            RespType::SimpleStr(Some(KW_QUEUED.to_string())).serialize()
+                            RespType::SimpleStr(Some(KW_QUEUED.to_string())).to_bytes()
                         }
                     }
                 }
@@ -392,8 +399,8 @@ impl CmdHandler {
         }
     }
 
-    fn get_null_array() -> Option<String> {
-        RespType::Array { length: 0, value: None }.serialize()
+    fn get_null_array() -> Option<Vec<u8>> {
+        RespType::Array { length: 0, value: None }.to_bytes()
     }
 
     pub fn callback_deadline_expire(&mut self) {
@@ -510,8 +517,8 @@ impl CmdHandler {
         Some(RespType::BulkStr{ length: s.len(), value: Some(s) })
     }
 
-    fn cmd_err(s: String) -> Option<String> {
-        RespType::SimpleStr(Some(s)).serialize()
+    fn cmd_err(s: String) -> Option<Vec<u8>> {
+        RespType::SimpleStr(Some(s)).to_bytes()
     }
 
     fn cmd_set(&mut self, key: String, value: String, opt: Option<CmdArg>) -> Option<RespType> {
@@ -736,7 +743,7 @@ impl CmdHandler {
                 let resp_item = RespType::BulkStr { length: item.len(), value: Some(item) };
                 output.add_item(resp_key);
                 output.add_item(resp_item);
-                handler.response_queue.push((client_id, output.serialize().unwrap()));
+                handler.response_queue.push((client_id, output.to_bytes().unwrap()));
                 println!("Push to response queue: , {:?}", &handler.response_queue.last().unwrap());
 
                 // Disable deadline
@@ -1139,7 +1146,7 @@ impl CmdHandler {
                         if stream_vec.is_empty() {
                            handler.response_queue.push((
                                    client_id,
-                                   RespType::Array { length: 0, value: None }.serialize().unwrap()));
+                                   RespType::Array { length: 0, value: None }.to_bytes().unwrap()));
                         } else {
                             let mut arr_stream = RespType::Array {
                                 length: stream_vec.len(), value: None };
@@ -1149,7 +1156,7 @@ impl CmdHandler {
                                 pair.add_item(entries);
                                 arr_stream.add_item(pair);
                             };
-                            handler.response_queue.push((client_id, arr_stream.serialize().unwrap()));
+                            handler.response_queue.push((client_id, arr_stream.to_bytes().unwrap()));
                             handler.registry.remove(&timestamp);
                         }
                     });
@@ -1324,6 +1331,7 @@ impl CmdHandler {
     }
 
     fn cmd_info(key: String) -> Option<RespType> {
+        println!("{}", key);
         if key.to_uppercase() == KW_REPLICATION {
             let config = Config::get();
             let msg = config.get_info();
@@ -1333,18 +1341,29 @@ impl CmdHandler {
         }
     }
 
-    fn cmd_psync(id: String, offset: i64) -> Option<RespType> {
-        if id == "?" {
+    fn cmd_psync(&mut self, id: String, offset: i64, client_id: u64) -> Option<RespType> {
+        if id == "?" && offset == -1 {
             let config = Config::get();
             match &config.role {
                 config::Replication::Master { id, offset } => {
                     let msg = format!("{} {} {}", &KW_FULLRESYNC, id, offset);
-                    Some(RespType::SimpleStr(Some(msg)))
+                    self.response_queue.push((client_id, RespType::SimpleStr(Some(msg)).to_bytes().unwrap()));
                 },
-                _ => None
-            }
+                _ => {},
+            };
+
+            // Example
+            let empty_rdb_b64 = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
+            let empty_rdb = STANDARD.decode(empty_rdb_b64).unwrap();
+            self.response_queue.push((client_id, RespType::RDB(Some(empty_rdb))
+                .to_bytes().unwrap()));
+            None
         } else {
             None
         }
+    }
+
+    fn cmd_replconf() -> Option<RespType> {
+        Self::response_ok()
     }
 }

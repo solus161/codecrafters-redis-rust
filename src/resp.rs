@@ -8,13 +8,28 @@ use std::time::Duration;
 
 #[derive(Debug)]
 pub enum ParseStatus {
-    None,       // Currently parsing nothing, wait for a type prefix
-    Type,       // Waiting for type
-    Header,     // Applicable for type that has Header
-    Line,       // Read till next \r\n
-    Bulk(usize),  // Bulk read 
+    None,           // Currently parsing nothing, wait for a type prefix
+    Type,           // Waiting for type
+    Header,         // Applicable for type that has Header
+    Line,           // Read till next \r\n
+    Bulk(usize),    // Bulk read 
+    RDB(usize),     // Parsing RDB
 }
 
+pub enum ReadBytesOutput {
+    // Either String for BulkStr or Vec<u8> for RDB parsing
+    String(String),
+    Bytes(Vec<u8>),
+}
+
+impl ReadBytesOutput {
+    pub fn str(self) -> Option<String> {
+        match self {
+            Self::String(s) => Some(s),
+            _ => None
+        }
+    }
+}
 
 //---------Parser
 #[derive(Debug)]
@@ -41,18 +56,21 @@ impl RespParser {
         // println!("Parser read to buf: {:?}", &data[..n]);
     }
 
-    pub fn parse(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn parse(&mut self, rdb: bool) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             // Check if top stack is is_completed
             self.pop_completed();
+            if !self.completed.is_empty() {
+                return Ok(())
+            }
 
             if self.buf.is_empty() {
                 // println!("Parser buf emtpy");
                 return Ok(());
             };
             
-            
             let current_status = std::mem::replace(&mut self.status, ParseStatus::Type);
+            
             match current_status {
                 ParseStatus::Type => {
                     // scan till new type
@@ -62,7 +80,7 @@ impl RespParser {
                     // - push down to next top opened type
                     // - or processed by handler
                     // println!("Parsing Type");
-                    match self.next_till_type() {
+                    match self.next_till_type(rdb) {
                         Some(resp_type) => {
                             self.stack.push(resp_type);
                             if let Some(top) = self.stack.last() {
@@ -91,12 +109,12 @@ impl RespParser {
                     // save result to object at top of stack
                     // println!("Parsing Header");
                     match self.next_till_new_line() {
-                        Some(s) => {
+                        Ok(Some(s)) => {
                             // This String s will be consumed by top stack resp type
                             // which has length attr
                             if let Some(top) = self.stack.last_mut() {
-                                // println!("{}", &s);
-                                let length: usize = s.parse()?;
+                                // println!("{:?}", &s);
+                                let length: usize = s.str().unwrap().parse()?;
                                 top.set_length(length);
 
                                 match top {
@@ -114,39 +132,42 @@ impl RespParser {
                                 };
                             };
                         },
-                        None => {
+                        Ok(None) => {
                             // Not enough bytes to assess new line
                             self.status = ParseStatus::Header;
                             return Ok(());
-                        }
+                        },
+                        Err(e) => return Err(e),
                     }
                 },
                 ParseStatus::Line => {
                     // scan till \r\n, work with types with no length attr
                     // println!("Parsing Line");
                     match self.next_till_new_line() {
-                        Some(s) => {
+                        Ok(Some(s)) => {
                             if let Some(top) = self.stack.last_mut() {
                                 // TODO: handle converting to i64
                                 top.set_value(s)?;
                                 self.status = ParseStatus::Type;
                             }
                         },
-                        None => {
+                        Ok(None) => {
                             // Not enough line to assess new line
                             self.status = ParseStatus::Line;
                             return Ok(());
-                        }
+                        },
+                        Err(e) => return Err(e)
                     }
                 },
-                ParseStatus::Bulk(n) => {
+                ParseStatus::Bulk(n) | ParseStatus::RDB(n) => {
                     // read n bytes
                     // e.g. PONG\r\n
                     // println!("Parsing Bulk");
-                    match self.read_bytes(n) {
+                    match self.read_bytes(n, rdb) {
                         Ok(o) => {
                             match o {
                                 Some(s) => {
+                                    // If rdb, the top resp of stack must be converted to rdb type
                                     if let Some(top) = self.stack.last_mut() {
                                         top.set_value(s)?;
                                         self.status = ParseStatus::Type;
@@ -158,7 +179,7 @@ impl RespParser {
                                 },
                             }
                         },
-                        Err(__) => {
+                        Err(_) => {
                             // TODO: handling error
                             // println!("{}", e);
                         }
@@ -176,7 +197,7 @@ impl RespParser {
         // Push out final type which could be nested
         loop {
             if self.stack.is_empty() {
-                break;
+                break
             } else {
                 let mut completed = false;
                 if let Some(top) = self.stack.last() {
@@ -184,9 +205,11 @@ impl RespParser {
                 };
                 if completed {
                     let completed_type = self.stack.pop().unwrap();
+                    // println!("Completed type {:?}", &completed_type);
+                    // println!("Stack {:?}", &self.stack);
                     if self.stack.is_empty() {
                         // There is no more than stack of 2 scalar/simple types
-                        // println!("Completed: {:?}", &completed_type);
+                        // println!("Completed pushed to completed stack: {:?}", &completed_type);
                         self.completed.push_back(completed_type);
                     } else {
                         // The next top must be of array type
@@ -194,9 +217,8 @@ impl RespParser {
                             top.add_item(completed_type);
                         }
                     }
-                    
                 } else {
-                    break 
+                    break
                 }
             }
         }
@@ -206,10 +228,10 @@ impl RespParser {
         self.completed.pop_front()
     }
 
-    fn next_till_type(&mut self) -> Option<RespType> {
+    fn next_till_type(&mut self, rdb: bool) -> Option<RespType> {
         // Consume buf till getting a type
         while !self.buf.is_empty() {
-            match RespType::match_prefix(self.buf[0]) {
+            match RespType::match_prefix(self.buf[0], rdb) {
                 Some(resp_type) => {
                     self.buf.pop_front();
                     return Some(resp_type);
@@ -222,7 +244,8 @@ impl RespParser {
         None
     }
 
-    fn next_till_new_line(&mut self) -> Option<String> {
+    fn next_till_new_line(&mut self) -> 
+        Result<Option<ReadBytesOutput>, Box<dyn std::error::Error>> {
         // Consume buf till getting new line \r\n
         // println!("Head 5 buff: {:?}", self.buf.iter().take(5).collect::<Vec<_>>());
         while self.buf.len() >= 2 {
@@ -234,11 +257,11 @@ impl RespParser {
                         //  Pop delimiter
                         self.buf.pop_front();
                         self.buf.pop_front();
-                        return Some(s.to_string());
+                        return Ok(Some(ReadBytesOutput::String(s.to_string())));
                     },
-                    Err(_) => { 
+                    Err(e) => { 
                         // TODO: handle utf8 converting error
-                        return None
+                        return Err(Box::new(e))
                     },
                 }
             } else {
@@ -246,33 +269,41 @@ impl RespParser {
                 self.tmp.push(self.buf.pop_front().unwrap());
             };
         };
-        None
+        Ok(None)
     }
 
-    fn read_bytes(&mut self, n: usize) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    fn read_bytes(&mut self, n: usize, rdb: bool) ->
+        Result<Option<ReadBytesOutput>, Box<dyn std::error::Error>> {
+        // Logic change: just read to n bytes
+        // - if rdb, end
+        // - if not, looking for \r\n
         let tmp_len = self.tmp.len();
         let buf_len = self.buf.len();
-        // Must also read ending \r\n
-        let next_len = (n + 2 - tmp_len).min(buf_len);
+        let mut ending_len = 2;
+
+        if rdb { ending_len = 0 }; 
+        let next_len = (n + ending_len - tmp_len).min(buf_len);
         
         if next_len > 0 {
             self.tmp.append(&mut self.buf.drain(..next_len).collect::<Vec<u8>>());
             // return Ok(None);
-        }; 
+        };
         
-        if self.tmp.len() == n + 2 {
+        if self.tmp.len() == n + ending_len {
             // tmp must end with \r\n
-            if self.tmp[n] == b'\r' && self.tmp[n+1] == b'\n' {
+            if !rdb && self.tmp[n] == b'\r' && self.tmp[n+1] == b'\n' {
                 match str::from_utf8(&self.tmp.drain(..n).collect::<Vec<u8>>()) {
                     Ok(s) => {
-                        self.tmp.drain(..);
-                        return Ok(Some(s.to_string())); 
+                        self.tmp.drain(..ending_len);
+                        return Ok(Some(ReadBytesOutput::String(s.to_string()))); 
                     },
                     Err(e) => {
                         // Error converting to utf8
                         return Err(Box::new(e));
                     }
                 };
+            } else if rdb {
+                Ok(Some(ReadBytesOutput::Bytes(self.tmp.drain(..n).collect::<Vec<u8>>()))) 
             } else {
                 // Error ending \r\n not found
                 return Err(Box::new(
@@ -282,13 +313,13 @@ impl RespParser {
                         )
                 )
             }
+
         } else {
            // Buf is empty
            return Ok(None);
         }
     }
 }
-
 
 
 //------ RespType
@@ -310,6 +341,7 @@ pub enum RespType {
     Attr,
     Set,
     Push,
+    RDB(Option<Vec<u8>>),
 }
 
 
@@ -358,15 +390,22 @@ impl RespType {
             Self::Attr => "|",
             Self::Set => "~",
             Self::Push => ">",
+            Self::RDB(_) => "$",
         }
     }
 
-    pub fn match_prefix(first_char: u8) -> Option<Self> {
+    pub fn match_prefix(first_char: u8, rdb: bool) -> Option<Self> {
         match first_char as char {
             '+' => Some(Self::SimpleStr(None)),
             '-' => Some(Self::Error(None)),
             ':' => Some(Self::Integer(None)),
-            '$' => Some(Self::BulkStr{ length: 0, value: None }),
+            '$' => {
+                if rdb {
+                    Some(Self::RDB(None))
+                } else {
+                    Some(Self::BulkStr{ length: 0, value: None })
+                }
+            },
             '*' => Some(Self::Array{ length: 0, value: None }),
             '_' => Some(Self::Null),
             '#' => Some(Self::Bool(None)),
@@ -441,22 +480,38 @@ impl RespType {
         }
     }
 
-    pub fn set_value(&mut self, parsed_value: String) -> 
+    pub fn set_value(&mut self, parsed_value: ReadBytesOutput) -> 
         Result<(), Box<dyn std::error::Error>> {
-        match self {
-            Self::SimpleStr(s) | Self::Error(s) => {
-                s.get_or_insert_with(String::new).push_str(&parsed_value);
-                Ok(())
+        match parsed_value {
+            ReadBytesOutput::String(s) => {
+                match self {
+                    Self::SimpleStr(o) | Self::Error(o) => {
+                        o.get_or_insert(s);
+                        Ok(())
+                    },
+                    Self::BulkStr { value, .. } => {
+                        value.get_or_insert(s);
+                        Ok(())
+                    },
+                    _ => {
+                        // Not implemented yet
+                        Err("Not implemented".into())
+                    }
+                }
             },
-            Self::BulkStr { value, .. } => {
-                value.get_or_insert_with(String::new).push_str(&parsed_value);
-                Ok(())
-            },
-            _ => {
-                // Not implemented yet
-                Err("Not implemented".into())
+            ReadBytesOutput::Bytes(v) => {
+                match self {
+                    Self::RDB(o) => {
+                        o.get_or_insert(v);
+                        Ok(())
+                    },
+                    _ => {
+                        Err("Not implemented".into())
+                    }
+                }
             }
         }
+        
     }
 
     pub fn get_value(self) -> Option<RespValue>{
@@ -544,6 +599,18 @@ impl RespType {
             _ => {
                 return None
             }
+        }
+    }
+
+    pub fn to_bytes(&self) -> Option<Vec<u8>> {
+        let prefix = self.get_prefix().to_string();
+        match self {
+            Self::RDB(Some(v)) => {
+                let mut output = format!("{}{}{}", &prefix, v.len(), DELIMITER).into_bytes();
+                output.extend_from_slice(v);
+                Some(output)
+            },
+            _ => Some(self.serialize()?.into_bytes())
         }
     }
 }
