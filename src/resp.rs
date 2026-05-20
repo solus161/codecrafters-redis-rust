@@ -85,7 +85,7 @@ impl RespParser {
                             self.stack.push(resp_type);
                             if let Some(top) = self.stack.last() {
                                 match top {
-                                    RespType::Array {..} | RespType::BulkStr {..} => {
+                                    RespType::Array {..} | RespType::BulkStr {..} | RespType::RDB(_) => {
                                         // println!("Found array-like type");
                                         self.status = ParseStatus::Header;
                                     },
@@ -126,6 +126,9 @@ impl RespParser {
                                     RespType::VerbatimStr { length, .. } => {
                                         self.status = ParseStatus::Bulk(*length);
                                     },
+                                    RespType::RDB(_) => {
+                                        self.status = ParseStatus::RDB(length);
+                                    },
                                     _ => {
                                         self.status = ParseStatus::Type;
                                     }
@@ -159,23 +162,36 @@ impl RespParser {
                         Err(e) => return Err(e)
                     }
                 },
-                ParseStatus::Bulk(n) | ParseStatus::RDB(n) => {
-                    // read n bytes
-                    // e.g. PONG\r\n
-                    // println!("Parsing Bulk");
-                    match self.read_bytes(n, rdb) {
+                ParseStatus::Bulk(n) => {
+                    match self.read_bytes(n, false) {
                         Ok(o) => {
                             match o {
                                 Some(s) => {
-                                    // If rdb, the top resp of stack must be converted to rdb type
                                     if let Some(top) = self.stack.last_mut() {
                                         top.set_value(s)?;
                                         self.status = ParseStatus::Type;
                                     };
-
                                 },
                                 None => {
                                     self.status = ParseStatus::Bulk(n)
+                                },
+                            }
+                        },
+                        Err(_) => {}
+                    }
+                },
+                ParseStatus::RDB(n) => {
+                    match self.read_bytes(n, true) {
+                        Ok(o) => {
+                            match o {
+                                Some(s) => {
+                                    if let Some(top) = self.stack.last_mut() {
+                                        top.set_value(s)?;
+                                        self.status = ParseStatus::Type;
+                                    };
+                                },
+                                None => {
+                                    self.status = ParseStatus::RDB(n)
                                 },
                             }
                         },
@@ -282,7 +298,7 @@ impl RespParser {
         let mut ending_len = 2;
 
         if rdb { ending_len = 0 }; 
-        let next_len = (n + ending_len - tmp_len).min(buf_len);
+        let next_len = (n + ending_len).saturating_sub(tmp_len).min(buf_len);
         
         if next_len > 0 {
             self.tmp.append(&mut self.buf.drain(..next_len).collect::<Vec<u8>>());
@@ -463,6 +479,12 @@ impl RespType {
                 match value {
                     Some(_) => return true,
                     None => return false
+                }
+            },
+            Self::RDB(o) => {
+                match o {
+                    Some(_) => return true,
+                    None => return false,
                 }
             },
             _ => return false,

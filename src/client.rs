@@ -86,6 +86,8 @@ impl TcpClient {
         };
         // println!("{:?}", &tmp_buf[..n]);
         // println!("Socket buf read: {:?}", from_utf8(&tmp_buf[..n]).unwrap());
+        println!("Socket buf read: {:?}", from_utf8(&tmp_buf[..n]).unwrap_or("binary"));
+
 
         // Push tmp_buf into current buf
         //println!("Current buf before append: {:?}", &self.buf);
@@ -105,7 +107,6 @@ impl TcpClient {
             // - If the client is neither a slave nor a master, all received resp 
             //   must be propagated to other slave, without converting to cmd
             match self.resp_parser.get_completed() {
-
                 Some(t) => {
                     println!("Completed type {:?}", t);
                     let buf = t.to_bytes().unwrap(); // for broadcasting
@@ -181,6 +182,10 @@ impl TcpClient {
             },
             HandShakeState::Established if matches!(cmd, Cmd::RDB(_)) => {
                 // Do st with the RDB
+                if let Cmd::RDB(b) = &cmd {
+                    println!("RDB {:?}", b);
+                };
+                
                 self.parse_rdb = false;
 
                 // Must set the sending client as master,
