@@ -19,6 +19,7 @@ mod cmd_builder;
 mod cmd_handler;
 mod client;
 mod resp;
+mod replication;
 mod tests;
 
 use crate::config::{Config, Replication};
@@ -26,6 +27,7 @@ use crate::client::{TcpClient, BUFFER_SIZE};
 use crate::epoll::{get_epoll_event_read, timer_create_event, timer_create_fd};
 use crate::resp::RespParser;
 use crate::cmd_handler::CmdHandler;
+use crate::replication::ClientTable;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parsing args for port
@@ -61,24 +63,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Connect to master
             let master = TcpStream::connect(format!("{}:{}", host, port))
                 .expect("Cannot connect to master");
-            let master_fd = master.as_raw_fd();
+            let master_fd = master.as_raw_fd() as u64;
 
             epoll::add_interest(
                 epoll_fd, master.as_raw_fd(), 
-                epoll::get_epoll_event_read(master_fd.try_into().unwrap()))?;
+                epoll::get_epoll_event_read(master_fd))?;
 
             // Put master to the client table
             let mut client_master = TcpClient::new(
-                    master_fd.try_into().unwrap(),
-                    master,
-                    Rc::clone(&cmd_handler));
+                master_fd,
+                master,
+                Rc::clone(&cmd_handler));
+
+            // Init handshake with master
+            client_master.init_handshake();
+            
+            // Store master
+            clients.insert(master_fd, client_master);
 
             // Initiate handshake
-            client_master.init_handshake();
-            clients.insert(
-                master_fd.try_into().unwrap(),
-                client_master
-                );
+            // client_master.init_handshake();
+            // clients.insert(
+            //     master_fd.try_into().unwrap(),
+            //     client_master
+            //     );
         }
     };
 
@@ -125,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 stream_key,
                                 epoll::get_epoll_event_read(stream_key as u64))?;
                             clients.insert(
-                                stream_key.try_into().unwrap(),
+                                stream_key.try_into().unwrap(), 
                                 TcpClient::new(
                                     stream_key.try_into().unwrap(),
                                     stream, 
@@ -152,6 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 
                 // St else, may be current client
                 key => {
+                    let client_table_rc = ClientTable::get();
                     if let Some(client) = clients.get_mut(&key) {
                         let mut disconnected = false;
                         // Bit mask of event type of an epoll event
@@ -180,7 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         if disconnected {
                             let _ = epoll::remove_interest(epoll_fd, client.stream.as_raw_fd());
-                            clients.remove(&key);
+                            client_table_rc.borrow_mut().remove_client(&key);
                         };
                     };
                 },
@@ -202,8 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // BLPOP responses gathered, now flush
         for res in cmd_handler.borrow_mut().response_queue.drain(..) { 
             let (client_id, message) = res;
-            let _ = clients.get_mut(&client_id).unwrap()
-                .stream.write_all(&message);
+            let _ = clients.get_mut(&client_id).unwrap().stream.write_all(&message);
         };
     }
 }

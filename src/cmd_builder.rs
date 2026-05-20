@@ -154,6 +154,17 @@ pub enum Cmd {
 }
 
 impl Cmd {
+    pub fn to_be_broadcast(&self) -> bool {
+        match self {
+            Self::SET { .. } | Self::LPUSH { .. } | Self::RPUSH { .. } |
+            Self::LPOP { .. } | Self::BLPOP { .. } | Self::INCR(_) | 
+            Self::XADD { .. } => {
+                true 
+            },
+            _ => {false}
+        }
+    }
+
     fn ping() -> Result<Self, CmdError> { Ok(Self::PING) }
     fn pong() -> Result<Self, CmdError> { Ok(Self::PONG) }
     fn ok() -> Result<Self, CmdError> { Ok(Self::OK) }
