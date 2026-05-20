@@ -159,6 +159,7 @@ impl TcpClient {
 
     fn handshake_to_master(&mut self, cmd: Cmd, buf: Vec<u8>, client_id: u64) -> Result<Option<Vec<u8>>, Vec<u8>> {
         // Client establishes handshake
+        println!("Cmd from master {:?}", &cmd);
         match self.handshake_state {
             HandShakeState::PING if matches!(cmd, Cmd::PONG) => {
                 self.handshake_state = HandShakeState::REPLCONF1;

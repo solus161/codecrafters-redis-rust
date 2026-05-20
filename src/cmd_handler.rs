@@ -280,7 +280,6 @@ pub struct CmdHandler {
     pub response_queue: Vec<(u64, Vec<u8>)>,
     data: HashMap<String, StoreItem>,
     registry: RequestRegistry,
-    pub handshake: bool,    // whether client establised handshaked
  }
 
 impl CmdHandler {
@@ -289,7 +288,6 @@ impl CmdHandler {
             response_queue: Vec::new(),
             data: HashMap::new(),
             registry: RequestRegistry::new(timer_fd),
-            handshake: false
         }
     }
 
@@ -1420,6 +1418,7 @@ impl CmdHandler {
                 .to_bytes().unwrap()));
             
             // Set client as slave
+            println!("Set client {} as slave", &client_id);
             let _ = ClientTable::get().borrow_mut().set_slave(client_id);
 
             Ok(None)
