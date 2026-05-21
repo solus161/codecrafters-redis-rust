@@ -10,8 +10,7 @@ use std::rc::Rc;
 use std::str::from_utf8;
 use libc;
 
-// mod app_state;
-mod config;
+mod app_state;
 #[macro_use]
 mod utils;
 mod epoll;
@@ -22,7 +21,7 @@ mod resp;
 mod replication;
 mod tests;
 
-use crate::config::{Config, Replication};
+use crate::app_state::{AppStates, ReplStats};
 use crate::client::{TcpClient, BUFFER_SIZE};
 use crate::epoll::{get_epoll_event_read, timer_create_event, timer_create_fd};
 use crate::resp::RespParser;
@@ -32,17 +31,21 @@ use crate::replication::ClientTable;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parsing args for port
     let args: Vec<String> = env::args().collect();
-    Config::init(args);
-    let config = Config::get();
+    AppStates::init(args);
+    let app_state = AppStates::get();
 
     // Fd for master, replica #[cfg(test)]
     // let mut master: Option<TcpStream> = None;
 
     // Fd for listener 
-    let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).unwrap();
+    let stats = app_state.host_stats.as_ref().unwrap();
+    let host = stats.host.as_deref().unwrap();
+    let port = stats.port.unwrap();
+    let listener = TcpListener::bind(format!("{}:{}", host, port)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let listener_fd = listener.as_raw_fd();
     let listener_fd_u64 = listener_fd as u64;
+    // drop(stats);
     
     // To store all clients or a master
     let mut clients: HashMap<u64, TcpClient> = HashMap::new();
@@ -56,10 +59,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let epoll_fd = epoll::epoll_create().expect("Error creating epoll queue");
 
     // Add a master if in slave #[cfg(test)]
-    match &config.role {
-        Replication::Master { .. } => {},
-        Replication::Slave { host, port } => {
+    match app_state.master_stats.as_ref() {
+        Some(repl_stats) => {
             println!("Run as replica");
+            let host = repl_stats.host.as_deref().unwrap();
+            let port = repl_stats.port.unwrap();
             // Connect to master
             let master = TcpStream::connect(format!("{}:{}", host, port))
                 .expect("Cannot connect to master");
@@ -87,7 +91,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             //     master_fd.try_into().unwrap(),
             //     client_master
             //     );
-        }
+        },
+        None => {}
     };
 
     // Add listener to epoll for changes

@@ -14,7 +14,7 @@ use crate::resp::{ RespType, RespValue };
 use crate::epoll::timer_create_event;
 use crate::cmd_builder::{ Cmd, CmdArg, CmdError, KW_FULLRESYNC, KW_PONG, KW_QUEUED, KW_REPLCONF, KW_REPLICATION, KW_ACK };
 use crate::utils::now;
-use crate::config::{self, Config, Replication};
+use crate::{ AppStates, ReplStats };
 use crate::ClientTable;
 
 // Stored value types for CmdHandler
@@ -175,7 +175,7 @@ impl RequestRegistry {
         Some(entry)
     }
 
-    fn set_timer_fd(&self) {
+fn set_timer_fd(&self) {
         match self.deadline.first_key_value() {
             Some((deadline, _)) => {
                 let now = now();
@@ -339,27 +339,23 @@ impl CmdHandler {
         match output {
             Ok(Some(resp)) => {
                 println!("Success cmd from client {}, broadcasting {}", &client_id, &to_be_broadcast);
-                match &Config::get().role {
-                    Replication::Master { .. } => {
-                        if to_be_broadcast {
-                            // println!("About to broadcast {:?}", from_utf8(&buf).unwrap());
-                            // ClientTable::get().borrow_mut().broadcaste(&buf);
-                            // Broadcast by push to response_queue
-                            println!("List of slave {:?}", &ClientTable::get().borrow().slaves);
-                            match ClientTable::get().borrow().list_slave() {
-                                Some(list) => {
-                                    println!("List of slave {:?}", &list);
-                                    for id in list {
-                                        println!("Put to queue for broadcasting id {}", *id);
-                                        self.response_queue.push((*id, buf.clone()));
-                                    }
-                                }
-                                None => {} 
+                // If sending client is master
+                // if ClientTable::get().borrow().is_master(&client_id) {
+                // Add bytes count to offset, this only 
+                AppStates::get().host_stats.as_ref().unwrap().add_bytes_count(buf.len() as i64);
+
+                if to_be_broadcast {
+                    // Broadcast by push to response_queue
+                    match ClientTable::get().borrow().list_slave() {
+                        Some(list) => {
+                            for id in list {
+                                self.response_queue.push((*id, buf.clone()));
                             }
                         }
-                    },
-                    _ => {}
-                };
+                        None => {} 
+                    }
+                }
+                // }
                 
                 // If sending client is master, not response 
                 // unless it's REPLCONF GETACK
@@ -1392,11 +1388,29 @@ impl CmdHandler {
     }
 
     fn cmd_info(key: String) -> Result<Option<RespType>, RespType> {
-        println!("{}", key);
         if key.to_uppercase() == KW_REPLICATION {
-            let config = Config::get();
-            let msg = config.get_info();
-            Ok(Some(RespType::BulkStr { length: msg.len(), value: Some(msg) }))
+            // The slave status initiated with --relicaof
+            if AppStates::get().is_slave() {
+                // If the sending client master
+                let role = "slave"; 
+                let stats = AppStates::get().master_stats.as_ref().unwrap();
+                let master_host = stats.host.as_ref().unwrap();
+                let master_port = stats.port.unwrap();
+                let msg = format!(
+                    "role:{}\r\nmaster_host:{}\r\nmaster_post:{}",
+                    role, master_host, &master_port);
+                Ok(Some(RespType::BulkStr { length: msg.len(), value: Some(msg) }))
+            } else {
+                let role = "master"; 
+                let stats = AppStates::get().host_stats.as_ref().unwrap();
+                // let master_replid = stats.id.read().unwrap();
+                let master_replid = "xxx"; // TODO for testing only
+                let master_repl_offset = stats.offset.load().max(0);
+                let msg = format!(
+                    "role:{}\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
+                    role, &master_replid, &master_repl_offset);
+                Ok(Some(RespType::BulkStr { length: msg.len(), value: Some(msg) }))
+            }
         } else {
             Ok(None)
         }
@@ -1404,14 +1418,13 @@ impl CmdHandler {
 
     fn cmd_psync(&mut self, id: String, offset: i64, client_id: u64) -> Result<Option<RespType>, RespType> {
         if id == "?" && offset == -1 {
-            let config = Config::get();
-            match &config.role {
-                config::Replication::Master { id, offset } => {
-                    let msg = format!("{} {} {}", &KW_FULLRESYNC, id, offset);
-                    self.response_queue.push((client_id, RespType::SimpleStr(Some(msg)).to_bytes().unwrap()));
-                },
-                _ => {},
-            };
+            // If sending client is slave
+            let stats = AppStates::get().host_stats.as_ref().unwrap();
+            // let id = stats.id.read().unwrap();
+            let id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"; // TODO: for testing only
+            let offset = stats.offset.load().max(0);
+            let msg = format!("{} {} {}", &KW_FULLRESYNC, &id, &offset);
+            self.response_queue.push((client_id, RespType::SimpleStr(Some(msg)).to_bytes().unwrap()));
 
             // Example
             let empty_rdb_b64 = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
@@ -1432,15 +1445,20 @@ impl CmdHandler {
     fn cmd_replconf(&self, arg: CmdArg) -> Result<Option<RespType>, RespType> {
         match arg {
             CmdArg::GETACK(s) => {
+                // Slave receives this after handshake established
                 if s == "*" {
                     // Response REPLCONF ACK <offset>
                     let mut arr = RespType::Array { length: 3, value: None };
                     let resp_replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
                     let resp_ack = RespType::BulkStr { length: KW_ACK.len(), value: Some(KW_ACK.to_string()) };
-                    let resp_offset = RespType::BulkStr { length: 1, value: Some("0".to_string()) };
+                    let offset = AppStates::get().host_stats.as_ref().unwrap().offset.load().max(0).to_string();
+                    let resp_offset = RespType::BulkStr { length: offset.len(), value: Some(offset) };
                     arr.add_item(resp_replconf);
                     arr.add_item(resp_ack);
                     arr.add_item(resp_offset);
+
+                    // After this, server starts counting for bytes from master
+                    AppStates::get().host_stats.as_ref().unwrap().start_bytes_count();
                     Ok(Some(arr))
                 } else {
                     Ok(None)

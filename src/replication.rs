@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::hash_set::Iter;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::AtomicI64;
 
 // Just a dump struct to store master and slave
 use crate::TcpClient;
@@ -11,7 +12,7 @@ use std::collections::HashSet;
 
 pub struct ClientTable {
     // clients: HashMap<u64, TcpClient>,
-    master: Option<u64>,
+    pub master: Option<u64>,
     pub slaves: Option<HashSet<u64>>,
 }
 
@@ -23,14 +24,6 @@ impl ClientTable {
     pub fn get() -> Rc<RefCell<Self>> {
         CLIENT_TABLE.with(|t| t.clone())
     }
-
-    // pub fn get_mut_client(&mut self, client_id: &u64) -> Option<&mut TcpClient> {
-    //     self.clients.get_mut(client_id)
-    // }
-
-    // pub fn add_client(&mut self, client: TcpClient, id: u64) {
-    //     self.clients.insert(id, client);
-    // }
 
     pub fn remove_client(&mut self, client_id: &u64) {
         if let Some(x) = &self.master {
@@ -61,13 +54,6 @@ impl ClientTable {
     pub fn set_master(&mut self, client_id: u64) -> Result<(), String> {
         self.master = Some(client_id);
         Ok(())
-        // if self.clients.contains_key(&client_id) {
-        //     self.master = Some(client_id);
-        //     Ok(())
-        // } else {
-        //     Err(format!("Client id {} does not exist", &client_id))
-        // }
-        
     }
 
     pub fn list_slave(&self) ->  Option<Iter<'_, u64>> {
@@ -79,17 +65,8 @@ impl ClientTable {
     }
 
     pub fn set_slave(&mut self, client_id: u64) -> Result<(), String> {
-        println!("Set client {} as slave", &client_id);
         self.slaves.get_or_insert_default().insert(client_id);
         Ok(())
-        // if self.clients.contains_key(&client_id) {
-        //     if let Some(l) = &mut self.slaves {
-        //         l.insert(client_id);
-        //     };
-        //     Ok(())
-        // } else {
-        //     Err(format!("Client id {} does not exist", &client_id))
-        // }
     }
 
     pub fn remove_slave(&mut self, client_id: &u64) {
@@ -97,17 +74,8 @@ impl ClientTable {
             l.remove(client_id);
         };
     }
-
-    // pub fn broadcaste(&mut self, buf: Vec<u8>) {
-    //     if let Some(h) = &self.slaves {
-    //         let mut vec_response: Vec<(u64, Vec<u8>)> = Vec::new();
-    //         h.iter().for_each(|id| {
-    //             vec_response.push((*id, buf));
-    //         })
-    //     };
-    // }
 }
 
 thread_local! {
-    static CLIENT_TABLE: Rc<RefCell<ClientTable>> = Rc::new(RefCell::new(ClientTable::new()))
+    static CLIENT_TABLE: Rc<RefCell<ClientTable>> = Rc::new(RefCell::new(ClientTable::new()));
 }

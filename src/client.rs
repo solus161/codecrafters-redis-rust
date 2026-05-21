@@ -8,7 +8,7 @@ use std::str::from_utf8;
 
 use base64::write;
 
-use crate::config::{self, Config, Replication};
+use crate::{ AppStates, ReplStats };
 use crate::cmd_handler::CmdHandler; 
 use crate::cmd_builder::{
     Cmd, CmdArg, CmdError, KW_CAPA, KW_FULLRESYNC, KW_LISTENING_PORT, KW_OK, KW_PING, KW_PSYNC, KW_REPLCONF};
@@ -86,8 +86,7 @@ impl TcpClient {
         };
         // println!("{:?}", &tmp_buf[..n]);
         // println!("Socket buf read: {:?}", from_utf8(&tmp_buf[..n]).unwrap());
-        println!("Socket buf read: {:?}", from_utf8(&tmp_buf[..n]).unwrap_or("binary"));
-
+        // println!("Socket buf read: {:?}", from_utf8(&tmp_buf[..n]).unwrap_or("binary"));
 
         // Push tmp_buf into current buf
         //println!("Current buf before append: {:?}", &self.buf);
@@ -115,7 +114,7 @@ impl TcpClient {
 
                     match cmd {
                         Ok(c) => {
-                            println!("{:?}", &c);
+                            // println!("{:?}", &c);
                             match self.repl_state.status {
                                 Some(ReplStatus::Master) => {
                                     response = self.handshake_to_master(c, buf, self.fd_key);
@@ -124,7 +123,6 @@ impl TcpClient {
                                 //     response = self.handshake_to_client(c, self.fd_key);
                                 // }
                                 _ => {
-                                    println!("Client");
                                     response = self.cmd_handler.borrow_mut().handle(Ok(c), buf, self.fd_key);
                                 }
                             }
@@ -160,14 +158,13 @@ impl TcpClient {
 
     fn handshake_to_master(&mut self, cmd: Cmd, buf: Vec<u8>, client_id: u64) -> Result<Option<Vec<u8>>, Vec<u8>> {
         // Client establishes handshake
-        println!("Cmd from master {:?}", &cmd);
+        // println!("Cmd from master {:?}", &cmd);
         match self.handshake_state {
             HandShakeState::PING if matches!(cmd, Cmd::PONG) => {
                 self.handshake_state = HandShakeState::REPLCONF1;
                 self.get_replconf1()
             },
             HandShakeState::REPLCONF1 if matches!(cmd, Cmd::OK) => {
-                println!("REPLCONF1");
                 self.handshake_state = HandShakeState::REPLCONF2;
                 self.get_replconf2()
             },
@@ -177,20 +174,13 @@ impl TcpClient {
             },
             HandShakeState::PSYNC if matches!(cmd, Cmd::FULLRESYNC { .. }) => {
                 self.handshake_state = HandShakeState::Established;
+                let _ =ClientTable::get().borrow_mut().set_master(client_id);
                 self.parse_rdb = true;
                 Ok(None)
             },
             HandShakeState::Established if matches!(cmd, Cmd::RDB(_)) => {
                 // Do st with the RDB
-                if let Cmd::RDB(b) = &cmd {
-                    println!("RDB {:?}", b);
-                };
-                
                 self.parse_rdb = false;
-
-                // Must set the sending client as master,
-                // so CmdHandler could skip response during broadcasting
-                let _ =ClientTable::get().borrow_mut().set_master(client_id);
                 Ok(None)
             },
             _ => {
@@ -214,7 +204,8 @@ impl TcpClient {
         let mut arr = RespType::Array { length: 3, value: None }; 
         let resp_replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
         let resp_listening = RespType::BulkStr { length: KW_LISTENING_PORT.len(), value: Some(KW_LISTENING_PORT.to_string()) };
-        let port: String = Config::get().port.to_string();
+        // let port: String = Config::get().port.to_string();
+        let port: String = AppStates::get().host_stats.as_ref().unwrap().port.unwrap().to_string();
         let resp_port = RespType::BulkStr { length: port.len(), value: Some(port) };
         arr.add_item(resp_replconf);
         arr.add_item(resp_listening);
