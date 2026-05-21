@@ -46,7 +46,7 @@ pub const KW_LISTENING_PORT: &str = "listening-port";
 pub const KW_CAPA: &str = "capa";
 pub const KW_FULLRESYNC: &str = "FULLRESYNC";
 const KW_GETACK: &str = "GETACK";
-const KW_ACK: &str = "ACK";
+pub const KW_ACK: &str = "ACK";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -154,7 +154,7 @@ pub enum Cmd {
 }
 
 impl Cmd {
-    pub fn to_be_broadcast(&self) -> bool {
+    pub const fn to_be_broadcast(&self) -> bool {
         match self {
             Self::SET { .. } | Self::LPUSH { .. } | Self::RPUSH { .. } |
             Self::LPOP { .. } | Self::BLPOP { .. } | Self::INCR(_) | 
@@ -162,6 +162,15 @@ impl Cmd {
                 true 
             },
             _ => {false}
+        }
+    }
+
+    pub const fn always_response(&self) -> bool {
+        match self {
+            Self::REPLCONF(CmdArg::GETACK(_)) => {
+                true
+            },
+            _ => false
         }
     }
 

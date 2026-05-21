@@ -12,7 +12,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 
 use crate::resp::{ RespType, RespValue };
 use crate::epoll::timer_create_event;
-use crate::cmd_builder::{ Cmd, CmdError, CmdArg, KW_PONG, KW_QUEUED, KW_REPLICATION, KW_FULLRESYNC };
+use crate::cmd_builder::{ Cmd, CmdArg, CmdError, KW_FULLRESYNC, KW_PONG, KW_QUEUED, KW_REPLCONF, KW_REPLICATION, KW_ACK };
 use crate::utils::now;
 use crate::config::{self, Config, Replication};
 use crate::ClientTable;
@@ -297,6 +297,7 @@ impl CmdHandler {
         // Set dirty first
         self.registry.set_dirty(&cmd); 
         let to_be_broadcast = cmd.to_be_broadcast();
+        let always_response = cmd.always_response();
         
         // Whether the client is master
         let is_master = ClientTable::get().borrow().is_master(&client_id);
@@ -328,7 +329,7 @@ impl CmdHandler {
             Cmd::UNWATCH => self.cmd_unwatch(client_id),
             Cmd::INFO(key) => Self::cmd_info(key),
             Cmd::PSYNC { id, offset } => self.cmd_psync(id, offset, client_id),
-            Cmd::REPLCONF(_) => Self::cmd_replconf(),
+            Cmd::REPLCONF(arg) => self.cmd_replconf(arg),
             Cmd::FULLRESYNC { .. } => Ok(None),
             Cmd::RDB(_) => Ok(None), // client level
             // _ => None
@@ -361,7 +362,8 @@ impl CmdHandler {
                 };
                 
                 // If sending client is master, not response 
-                if !is_master {
+                // unless it's REPLCONF GETACK
+                if !is_master | always_response {
                     if serialized {
                         Ok(CmdOutput::Bytes(resp.to_bytes().unwrap()))
                     } else {
@@ -1427,7 +1429,30 @@ impl CmdHandler {
         }
     }
 
-    fn cmd_replconf() -> Result<Option<RespType>, RespType> {
-        Ok(Self::response_ok())
+    fn cmd_replconf(&self, arg: CmdArg) -> Result<Option<RespType>, RespType> {
+        match arg {
+            CmdArg::GETACK(s) => {
+                if s == "*" {
+                    // Response REPLCONF ACK <offset>
+                    let mut arr = RespType::Array { length: 3, value: None };
+                    let resp_replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
+                    let resp_ack = RespType::BulkStr { length: KW_ACK.len(), value: Some(KW_ACK.to_string()) };
+                    let resp_offset = RespType::BulkStr { length: 1, value: Some("0".to_string()) };
+                    arr.add_item(resp_replconf);
+                    arr.add_item(resp_ack);
+                    arr.add_item(resp_offset);
+                    Ok(Some(arr))
+                } else {
+                    Ok(None)
+                }
+            },
+            CmdArg::ListeningPort(_) => {
+                Ok(Self::response_ok())
+            },
+            CmdArg::Capa(_) => {
+                Ok(Self::response_ok())
+            },
+            _ => Ok(None)
+        } 
     }
 }
