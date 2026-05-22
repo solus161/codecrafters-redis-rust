@@ -198,7 +198,13 @@ impl RequestRegistry {
                 self.backlog_wait.remove(&client_id);
                 for i in slave_ids {
                     self.backlog_ack.entry(*i).and_modify(|v| v.retain(|x| *x != client_id));
-                }
+                    match self.backlog_ack.get(i) {
+                        Some(v) => {
+                            if v.is_empty() {self.backlog_ack.remove(i);};
+                        },
+                        None => {},
+                    }
+                };
                 deadline
             }
         };
@@ -335,10 +341,14 @@ impl CmdHandler {
         // Whether the client is master
         let is_master = ClientTable::get().borrow().is_master(&client_id);
         
-        // Add bytes count to offset
-        AppStates::get().host_stats.as_ref().unwrap().add_bytes_count(buf.len() as i64);
+        // Master only: count write commands propagated to replicas
+        // Slave side counting happens after dispatch (to get correct pre-GETACK offset)
+        if to_be_broadcast && !is_master {
+            println!("Adds {} bytes to offset", buf.len());
+            AppStates::get().host_stats.as_ref().unwrap().add_bytes_count(buf.len() as i64);
+        };
 
-        println!("Cmd received {:?}, to be broadcast {}", &cmd, &to_be_broadcast);
+        println!("Client id {}, Cmd received {:?}, to be broadcast {}", &client_id, &cmd, &to_be_broadcast);
         let output: Result<Option<RespType>, RespType> = match cmd {
             Cmd::PING => Self::cmd_ping(),
             Cmd::PONG => Ok(None), // handle at client level when handshaking
@@ -389,7 +399,13 @@ impl CmdHandler {
                 }
                 // }
                 
-                // If sending client is master, not response 
+                // Slave: count all bytes received from master AFTER dispatch
+                // so GETACK reads the pre-GETACK offset when building its response
+                if is_master {
+                    AppStates::get().host_stats.as_ref().unwrap().add_bytes_count(buf.len() as i64);
+                };
+
+                // If sending client is master, not response
                 // unless it's REPLCONF GETACK
                 if !is_master | always_response {
                     if serialized {
@@ -400,12 +416,12 @@ impl CmdHandler {
                 } else {
                     Ok(CmdOutput::None)
                 }
-                
-                // Command propagation should be done here
-                // so work in both case of normal execution and txn execution
-                
+
             },
             Err(resp) => {
+                if is_master {
+                    AppStates::get().host_stats.as_ref().unwrap().add_bytes_count(buf.len() as i64);
+                };
                 if serialized {
                     Err(CmdOutput::Bytes(resp.to_bytes().unwrap()))
                 } else {
@@ -1492,9 +1508,7 @@ impl CmdHandler {
                     arr.add_item(resp_replconf);
                     arr.add_item(resp_ack);
                     arr.add_item(resp_offset);
-
-                    // After this, server starts counting for bytes from master
-                    AppStates::get().host_stats.as_ref().unwrap().start_bytes_count();
+                    println!("Slave should response {:?}", arr);
                     Ok(Some(arr))
                 } else {
                     Ok(None)
@@ -1525,7 +1539,7 @@ impl CmdHandler {
                     for id in client_ids {
                         let timestamp = self.registry.backlog_wait.get(&id).unwrap();
                         match self.registry.store.get_mut(timestamp) {
-                            Some(RequestEntry::Wait { required_count, actual_count, offset_snapshot, .. }) => {
+                            Some(RequestEntry::Wait { actual_count, offset_snapshot, required_count, .. }) => {
                                 // Check if slave offset >= snapshot offset 
                                 if offset >= *offset_snapshot {
                                     actual_count.set(actual_count.get() + 1);
@@ -1535,13 +1549,12 @@ impl CmdHandler {
                                     slave_client_done.push(*id);
                                 };
 
-                                // If required count reaches, response to client
+                                // If all slaves responsed
                                 if actual_count.get() >= *required_count {
                                     // Response to client
                                     let resp_count = RespType::Integer(Some(actual_count.get() as i64));
                                     self.response_queue.push((*id, resp_count.to_bytes().unwrap()));
 
-                                    // 
                                     client_done.push(*id);
                                 }
                             },
@@ -1596,11 +1609,13 @@ impl CmdHandler {
         };
 
         // Short-circuit condition: if master offset = 0, return nbr of replicas
-        if AppStates::get().host_stats.as_ref().unwrap().offset.load() < 0 {
+        println!("Master offset {}", AppStates::get().host_stats.as_ref().unwrap().offset.load());
+        if AppStates::get().host_stats.as_ref().unwrap().offset.load() == 0 {
             let slave_count = match &ClientTable::get().borrow().slaves {
                 Some(h) => h.len(),
                 None => 0
             };
+            println!("Short-circuit trigger replica count {}", slave_count);
             let resp_count = RespType::Integer(Some(slave_count as i64));
             return Ok(Some(resp_count))
         };
@@ -1623,6 +1638,7 @@ impl CmdHandler {
         match ClientTable::get().borrow().slaves.as_ref() {
             Some(h) => {
                 for k in h.iter() {
+                    println!("Master sends GETACK to client {}", k);
                     self.response_queue.push((*k, arr.to_bytes().unwrap()));
                     slave_ids.push(*k);
                 }

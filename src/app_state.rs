@@ -108,6 +108,9 @@ impl AppStates {
         );
         let master_repl = ReplStats::parse_replicaof(replica_stats);
         
+        // After this, master start counting for bytes 
+        host_resp.start_bytes_count();
+        
         let _ = APP_STATES.set(Self{ host_stats: Some(host_resp), master_stats: master_repl});
     }
 

@@ -189,6 +189,9 @@ impl TcpClient {
             HandShakeState::Established if matches!(cmd, Cmd::RDB(_)) => {
                 // Do st with the RDB
                 self.parse_rdb = false;
+                
+                // After this, server starts counting for bytes from master
+                AppStates::get().host_stats.as_ref().unwrap().start_bytes_count();
                 Ok(None)
             },
             _ => {
