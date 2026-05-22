@@ -76,6 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Put master to the client table
             let mut client_master = TcpClient::new(
                 master_fd,
+                epoll_fd,
                 master,
                 Rc::clone(&cmd_handler));
 
@@ -141,6 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 stream_key.try_into().unwrap(), 
                                 TcpClient::new(
                                     stream_key.try_into().unwrap(),
+                                    epoll_fd,
                                     stream, 
                                     Rc::clone(&cmd_handler)));
                         },

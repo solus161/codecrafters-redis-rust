@@ -45,7 +45,8 @@ impl ReplState {
 }
 
 pub struct TcpClient {
-    pub fd_key: u64,
+    pub client_fd: u64,
+    pub epoll_fd: i32,          // fd of the epoll queue to control the timer
     pub stream: TcpStream,
     pub resp_parser: RespParser,
     pub cmd_handler: Rc<RefCell<CmdHandler>>,
@@ -53,17 +54,20 @@ pub struct TcpClient {
     // repl_status: ReplStatus,
     repl_state: ReplState,
     parse_rdb: bool,
+    blocked_read: bool,     // defer any buffer consumed
 }
 
 pub const BUFFER_SIZE: i32 = 4096;
 
 impl TcpClient {
     pub fn new(
-        fd_key: u64,
+        client_fd: u64,
+        epoll_fd: i32,
         stream: TcpStream, 
         cmd_handler: Rc<RefCell<CmdHandler>>) -> Self {
         Self {
-            fd_key: fd_key,
+            client_fd: client_fd,
+            epoll_fd: epoll_fd,
             stream: stream,
             resp_parser: RespParser::new(),
             cmd_handler: cmd_handler,
@@ -71,6 +75,7 @@ impl TcpClient {
             // repl_status: ReplStatus::None,
             repl_state: ReplState::new(),
             parse_rdb: false,
+            blocked_read: false,
         }
     }
 
@@ -117,18 +122,20 @@ impl TcpClient {
                             // println!("{:?}", &c);
                             match self.repl_state.status {
                                 Some(ReplStatus::Master) => {
-                                    response = self.handshake_to_master(c, buf, self.fd_key);
+                                    response = self.handshake_to_master(c, buf, self.client_fd, self.epoll_fd);
                                 },
                                 // Some(ReplStatus::Slave) => {
-                                //     response = self.handshake_to_client(c, self.fd_key);
+                                //     response = self.handshake_to_client(c, self.client_fd);
                                 // }
                                 _ => {
-                                    response = self.cmd_handler.borrow_mut().handle(Ok(c), buf, self.fd_key);
+                                    response = self.cmd_handler.borrow_mut().handle(
+                                        Ok(c), buf,
+                                        self.client_fd, self.epoll_fd);
                                 }
                             }
                         },
                         Err(e) => {
-                            response = self.cmd_handler.borrow_mut().handle(Err(e), buf, self.fd_key) 
+                            response = self.cmd_handler.borrow_mut().handle(Err(e), buf, self.client_fd, self.epoll_fd) 
                             // return Err(Box::new(e)),
                         }
                     };
@@ -156,7 +163,8 @@ impl TcpClient {
         self.stream.write_all(buf)
     }
 
-    fn handshake_to_master(&mut self, cmd: Cmd, buf: Vec<u8>, client_id: u64) -> Result<Option<Vec<u8>>, Vec<u8>> {
+    fn handshake_to_master(&mut self, cmd: Cmd, buf: Vec<u8>, client_id: u64, epoll_fd: i32)
+        -> Result<Option<Vec<u8>>, Vec<u8>> {
         // Client establishes handshake
         // println!("Cmd from master {:?}", &cmd);
         match self.handshake_state {
@@ -185,7 +193,7 @@ impl TcpClient {
             },
             _ => {
                 // TODO
-                self.cmd_handler.borrow_mut().handle(Ok(cmd), buf, client_id)
+                self.cmd_handler.borrow_mut().handle(Ok(cmd), buf, client_id, epoll_fd)
             }
         }
     }

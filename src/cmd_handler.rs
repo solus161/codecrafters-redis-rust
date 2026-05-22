@@ -1,9 +1,12 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet, btree_map};
 use std::collections::{HashMap, VecDeque, hash_map::Entry };
 use std::iter;
 use std::ops::Bound::{Included, Excluded, Unbounded};
+use std::rc::Rc;
 use std::str::from_utf8;
 use std::string::ParseError;
+use std::sync::atomic::{ AtomicU64, Ordering };
 
 use base64::write;
 use libc::{key_t, write};
@@ -11,8 +14,8 @@ use libc::{key_t, write};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
 use crate::resp::{ RespType, RespValue };
-use crate::epoll::timer_create_event;
-use crate::cmd_builder::{ Cmd, CmdArg, CmdError, KW_FULLRESYNC, KW_PONG, KW_QUEUED, KW_REPLCONF, KW_REPLICATION, KW_ACK };
+use crate::epoll::{add_interest, get_epoll_event_read, remove_interest, timer_create_event};
+use crate::cmd_builder::{ Cmd, CmdArg, CmdError, KW_ACK, KW_FULLRESYNC, KW_GETACK, KW_PONG, KW_QUEUED, KW_REPLCONF, KW_REPLICATION };
 use crate::utils::now;
 use crate::{ AppStates, ReplStats };
 use crate::ClientTable;
@@ -51,16 +54,6 @@ struct StoreItem { value: StoreValue, expired_at: Option<u64> }
 
 type Task = Box<dyn FnOnce(&mut CmdHandler)>;
 
-//---------Request registry: manage waiting request for CmdHandler
-//---------Storing context of a request
-// struct RequestEntry {
-//     pub client_id: u64,
-//     pub key: String,
-//     pub deadline: u64,
-//     pub backlog_task: Task,     // Task run when request fullfilled
-//     pub deadline_task: Task,    // Task run at deadline
-// }
-
 enum RequestEntry {
     List {
         client_id: u64, key: String, deadline: u64,
@@ -68,7 +61,12 @@ enum RequestEntry {
     Stream {
         client_id: u64, key_ts: Vec<(String, u64, u64)>, // key, ts, seq
         deadline: u64, backlog_task: Task, deadline_task: Task,
-    }
+    },
+    Wait {
+        client_id: u64, required_count: u64, actual_count: Rc<Cell<u64>>,
+        deadline: u64, offset_snapshot: i64,
+        slave_ids: Vec<u64>, deadline_task: Task,
+    },
 }
 
 impl RequestEntry {
@@ -80,6 +78,9 @@ impl RequestEntry {
             Self::Stream { deadline, .. } => {
                 *deadline = d
             },
+            Self::Wait {deadline, .. } => {
+                *deadline = d
+            }
         }
     }
 }
@@ -103,6 +104,13 @@ struct RequestRegistry {
     // Watch list, key - (client_id - dirty)
     watchlist: HashMap<String, HashMap<u64, bool>>,
 
+    // To store waiting WAIT for client, client_id - timestamp
+    backlog_wait: HashMap<u64, u64>,
+
+    // To store client must send back ACK, slave_id - list of client_id
+    // master could receive multiple WAIT from multiple clients
+    backlog_ack: HashMap<u64, Vec<u64>>,
+
     // deadline - timestamp
     deadline: BTreeMap<u64, u64>,
     timer_fd: i32,
@@ -116,6 +124,8 @@ impl RequestRegistry {
             backlog_stream: HashSet::new(),
             backlog_txn: HashMap::new(),
             watchlist: HashMap::new(),
+            backlog_wait: HashMap::new(),
+            backlog_ack: HashMap::new(),
             deadline: BTreeMap::new(),
             timer_fd,
         }
@@ -126,9 +136,17 @@ impl RequestRegistry {
         timestamp: u64,
         deadline: u64,
         mut request_entry: RequestEntry) {
+        // Insert a RequestEntry to the Registry storage structure
+        // A RequestEntry will be stored in: 
+        // - self.store as the center storage, distinguished by signature timestamp
+        // - a deadline queue, to signify what action to take when that Entry expires,
+        //   the signature is deadline, also unique for each entry
+        // - a dedicated list/hashmap/hashset etc. to store the fullfilment progress
         if deadline > 0 {
             let mut d = deadline;
             while self.deadline.contains_key(&d) {
+                // This is to avoid deadline collision, 
+                // no 2 or more Entry will have the same deadline
                 d += 1
             };
             self.deadline.insert(d, timestamp);
@@ -136,13 +154,19 @@ impl RequestRegistry {
             self.set_timer_fd();
         };
 
-        match request_entry {
-            RequestEntry::List { ref key, .. } => {
+        match &request_entry {
+            RequestEntry::List { key, .. } => {
                 self.backlog_list.entry(key.clone())
                     .or_insert_with(VecDeque::new).push_back(timestamp);
             },
             RequestEntry::Stream { .. } => {
                 self.backlog_stream.insert(timestamp);
+            },
+            RequestEntry::Wait { client_id, slave_ids, .. } => {
+                self.backlog_wait.insert(*client_id, timestamp);
+                for i in slave_ids {
+                    self.backlog_ack.entry(*i).or_insert_with(Vec::new).push(*client_id); 
+                }
             }
         }
             
@@ -150,6 +174,8 @@ impl RequestRegistry {
     }
     
     pub fn remove(&mut self, timestamp: &u64) -> Option<RequestEntry> {
+        // Remove a RequestEntry completely
+        // This could be call more than once without error
         let entry = self.store.remove(timestamp)?;
         
         let deadline = match entry {
@@ -168,6 +194,13 @@ impl RequestRegistry {
                 self.backlog_stream.remove(timestamp);
                 deadline
             },
+            RequestEntry::Wait { client_id, deadline, ref slave_ids, .. } => {
+                self.backlog_wait.remove(&client_id);
+                for i in slave_ids {
+                    self.backlog_ack.entry(*i).and_modify(|v| v.retain(|x| *x != client_id));
+                }
+                deadline
+            }
         };
         
         self.deadline.remove(&deadline);
@@ -292,7 +325,7 @@ impl CmdHandler {
     }
 
     fn _execute_cmd(
-        &mut self, cmd: Cmd, buf: Vec<u8>, client_id: u64,
+        &mut self, cmd: Cmd, buf: Vec<u8>, client_id: u64, epoll_fd: Option<i32>,
         serialized: bool) -> Result<CmdOutput, CmdOutput> {
         // Set dirty first
         self.registry.set_dirty(&cmd); 
@@ -301,6 +334,9 @@ impl CmdHandler {
         
         // Whether the client is master
         let is_master = ClientTable::get().borrow().is_master(&client_id);
+        
+        // Add bytes count to offset
+        AppStates::get().host_stats.as_ref().unwrap().add_bytes_count(buf.len() as i64);
 
         println!("Cmd received {:?}, to be broadcast {}", &cmd, &to_be_broadcast);
         let output: Result<Option<RespType>, RespType> = match cmd {
@@ -329,9 +365,10 @@ impl CmdHandler {
             Cmd::UNWATCH => self.cmd_unwatch(client_id),
             Cmd::INFO(key) => Self::cmd_info(key),
             Cmd::PSYNC { id, offset } => self.cmd_psync(id, offset, client_id),
-            Cmd::REPLCONF(arg) => self.cmd_replconf(arg),
+            Cmd::REPLCONF(arg) => self.cmd_replconf(arg, client_id, epoll_fd),
             Cmd::FULLRESYNC { .. } => Ok(None),
             Cmd::RDB(_) => Ok(None), // client level
+            Cmd::WAIT { count, timeout_ms } => self.cmd_wait(count, timeout_ms, client_id, epoll_fd),
             // _ => None
         };
 
@@ -339,11 +376,6 @@ impl CmdHandler {
         match output {
             Ok(Some(resp)) => {
                 println!("Success cmd from client {}, broadcasting {}", &client_id, &to_be_broadcast);
-                // If sending client is master
-                // if ClientTable::get().borrow().is_master(&client_id) {
-                // Add bytes count to offset, this only 
-                AppStates::get().host_stats.as_ref().unwrap().add_bytes_count(buf.len() as i64);
-
                 if to_be_broadcast {
                     // Broadcast by push to response_queue
                     match ClientTable::get().borrow().list_slave() {
@@ -385,11 +417,12 @@ impl CmdHandler {
     }
 
     pub fn handle(
-        &mut self, cmd: Result<Cmd, CmdError>, buf: Vec<u8>, client_id: u64) -> Result<Option<Vec<u8>>, Vec<u8>> {
+        &mut self, cmd: Result<Cmd, CmdError>, buf: Vec<u8>, client_id: u64, epoll_fd: i32)
+        -> Result<Option<Vec<u8>>, Vec<u8>> {
         match cmd {
             Ok(c) => {
                 if !self.registry.backlog_txn.contains_key(&client_id) {
-                    self._execute_cmd(c, buf, client_id, true)
+                    self._execute_cmd(c, buf, client_id, Some(epoll_fd), true)
                         .map(|out| {out.extract_bytes()})
                         .map_err(|err| err.extract_bytes().unwrap_or_default())
                 } else {
@@ -445,7 +478,7 @@ impl CmdHandler {
         }
     }
     
-    fn get_deadline(timeout_ms: Option<i64>) -> (u64, u64) {
+    fn get_deadline(timeout_ms: Option<u64>) -> (u64, u64) {
         let now = now();
         match timeout_ms{
             Some(timeout) => {
@@ -470,9 +503,12 @@ impl CmdHandler {
                 },
                 RequestEntry::Stream { deadline_task, .. } => {
                     deadline_task(self);
+                },
+                RequestEntry::Wait { deadline_task, .. } => {
+                    deadline_task(self)
                 }
             },
-            None => {},
+            None => { },
         };
     }
 
@@ -772,7 +808,7 @@ impl CmdHandler {
     fn cmd_blpop(
         &mut self, 
         key: String, 
-        timeout_ms: Option<i64>, 
+        timeout_ms: Option<u64>, 
         client_id: u64) -> Result<Option<RespType>, RespType>
     {
         let (timestamp, deadline) = Self::get_deadline(timeout_ms);
@@ -1176,7 +1212,7 @@ impl CmdHandler {
                 Some(t_ms) => {
                     // Put to wait queue 
                     // BLOCK 0 means wait indefinitely — pass None so no deadline timer is armed
-                    let timeout_arg = if t_ms == 0 { None } else { Some(t_ms as i64) };
+                    let timeout_arg = if t_ms == 0 { None } else { Some(t_ms as u64) };
                     let (timestamp, deadline) = Self::get_deadline(timeout_arg);
                     
                     // This will run if conditions meet
@@ -1339,7 +1375,7 @@ impl CmdHandler {
                     // Cmd will certainly be executed, could unwatch now
                 // self.registry.unwatch(&client_id, &cmd);
 
-                match self._execute_cmd(cmd, buf, client_id, false) {
+                match self._execute_cmd(cmd, buf, client_id, None, false) {
                     Ok(cmd_output) | Err(cmd_output) => vec_resp.push(cmd_output.extract_resp().unwrap()), // also need propagation
                 }
             });
@@ -1442,7 +1478,7 @@ impl CmdHandler {
         }
     }
 
-    fn cmd_replconf(&self, arg: CmdArg) -> Result<Option<RespType>, RespType> {
+    fn cmd_replconf(&mut self, arg: CmdArg, client_id: u64, epoll_fd: Option<i32>) -> Result<Option<RespType>, RespType> {
         match arg {
             CmdArg::GETACK(s) => {
                 // Slave receives this after handshake established
@@ -1470,7 +1506,151 @@ impl CmdHandler {
             CmdArg::Capa(_) => {
                 Ok(Self::response_ok())
             },
+            CmdArg::ACK(offset) => {
+                // This is when master receive ACK from slave
+                // Make sure that slave sends this only when receive GETACK from master
+                // that way slave was certainly registered in backlog_wait
+                
+                // client_id here is actually slave_id
+                // so we need to get client_id through backlog_ack
+                let slave_id = client_id;
+
+                // List of client sending WAIT
+                // let client_ids = self.registry.backlog_ack.get(&slave_id);
+
+                // Make sure that master has add slave to backlog_ack when receiving WAIT
+                let mut slave_client_done: Vec<u64> = Vec::new();
+                let mut client_done: Vec<u64> = Vec::new();
+                if let Some(client_ids) = self.registry.backlog_ack.get(&slave_id) {
+                    for id in client_ids {
+                        let timestamp = self.registry.backlog_wait.get(&id).unwrap();
+                        match self.registry.store.get_mut(timestamp) {
+                            Some(RequestEntry::Wait { required_count, actual_count, offset_snapshot, .. }) => {
+                                // Check if slave offset >= snapshot offset 
+                                if offset >= *offset_snapshot {
+                                    actual_count.set(actual_count.get() + 1);
+
+                                    // Slave fullfilled ACK to a client, must be removed from list
+                                    // saved to remove later
+                                    slave_client_done.push(*id);
+                                };
+
+                                // If required count reaches, response to client
+                                if actual_count.get() >= *required_count {
+                                    // Response to client
+                                    let resp_count = RespType::Integer(Some(actual_count.get() as i64));
+                                    self.response_queue.push((*id, resp_count.to_bytes().unwrap()));
+
+                                    // 
+                                    client_done.push(*id);
+                                }
+                            },
+                            _ => {}
+                        }
+                    };
+                };
+                
+                // Remove slave fullfilling ACT to a client
+                let mut slave_done = false;
+                if let Some(client_list) = self.registry.backlog_ack.get_mut(&slave_id) {
+                    for i in slave_client_done {
+                        client_list.retain(|x| *x != i);
+                    }
+                    slave_done = client_list.is_empty();
+                };
+
+                // Remove slave if fullfilled all clients
+                if slave_done {
+                    self.registry.backlog_ack.remove(&slave_id);
+                };
+
+                // Remove a client request if WAIT count is fullfilled
+                let mut timestamp_done: Vec<u64> = Vec::new();
+                client_done.iter().for_each(|i| {
+                    let timestamp = self.registry.backlog_wait.get(i).unwrap();
+                    timestamp_done.push(*timestamp);
+                    
+                    // Re-register fd for client
+                    let _ = add_interest(epoll_fd.unwrap(), *i as i32, get_epoll_event_read(*i));
+                });
+                timestamp_done.iter().for_each(|t| {self.registry.remove(t);});
+                
+                Ok(None)
+            },
             _ => Ok(None)
         } 
+    }
+
+    fn cmd_wait(&mut self, count: u64, timeout_ms: Option<u64>, client_id: u64, epoll_fd: Option<i32>)
+        -> Result<Option<RespType>, RespType> {
+        // 3 cases of WAIT:
+        // - WAIT 0 0: return immediately, no blocking
+        // - WAIT N 0: block indefinitely till N ACK catching up
+        // - WAIT N T: block till N ACK catching up or expire in T
+        // Return the RESP integer nbr of slaves catching up
+
+        if count == 0 {
+            // First case  
+            let resp_count = RespType::Integer(Some(0));
+            return Ok(Some(resp_count))
+        };
+    
+        // The block indefinitely or not is implemented in registry.insert
+        
+        // Get offset snapshot
+        let offset_snapshot = AppStates::get().host_stats.as_ref().unwrap().offset.load();
+
+        // Send ACK to all slave
+        let mut arr = RespType::Array { length: 3, value: None };
+        let resp_replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
+        let resp_getack = RespType::BulkStr { length: KW_GETACK.len(), value: Some(KW_GETACK.to_string()) };
+        let resp_asterik = RespType::BulkStr { length: 1, value: Some("*".to_string()) };
+        arr.add_item(resp_replconf);
+        arr.add_item(resp_getack);
+        arr.add_item(resp_asterik);
+        
+        let mut slave_ids: Vec<u64> = Vec::new();
+        match ClientTable::get().borrow().slaves.as_ref() {
+            Some(h) => {
+                for k in h.iter() {
+                    self.response_queue.push((*k, arr.to_bytes().unwrap()));
+                    slave_ids.push(*k);
+                }
+            },
+            None => {}
+        };
+
+        let (timestamp, deadline) = Self::get_deadline(timeout_ms);
+        let actual_count: Rc<Cell<u64>> = Rc::new(Cell::new(0));
+        let count_ref = actual_count.clone();
+        let deadline_task = Box::new(move |handler: &mut CmdHandler| {
+            // Send response to client
+            let resp_count = RespType::Integer(Some(count_ref.get() as i64));
+            handler.response_queue.push((client_id, resp_count.to_bytes().unwrap()));
+
+            // Remove client from registry
+            handler.registry.remove(&timestamp);
+
+            // Re-register epoll
+            let _ = add_interest(epoll_fd.unwrap(), client_id as i32, get_epoll_event_read(client_id));
+        });
+        
+        // Register the entry which store the ACK data
+        
+        let request_entry = RequestEntry::Wait {
+            client_id,
+            required_count: count,
+            actual_count: actual_count,
+            deadline,
+            offset_snapshot,
+            slave_ids,
+            deadline_task
+        };
+        self.registry.insert(timestamp, deadline, request_entry);
+
+        // Remove current client from epoll wait queue till response
+        let _ = remove_interest(epoll_fd.unwrap(), client_id as i32);
+        
+        Ok(None)
     }
 }

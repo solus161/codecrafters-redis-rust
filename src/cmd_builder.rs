@@ -45,8 +45,9 @@ pub const KW_PSYNC: &str = "PSYNC";
 pub const KW_LISTENING_PORT: &str = "listening-port";
 pub const KW_CAPA: &str = "capa";
 pub const KW_FULLRESYNC: &str = "FULLRESYNC";
-const KW_GETACK: &str = "GETACK";
+pub const KW_GETACK: &str = "GETACK";
 pub const KW_ACK: &str = "ACK";
+pub const KW_WAIT: &str = "WAIT";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -135,7 +136,7 @@ pub enum Cmd {
     LPUSH { key: String, value: VecDeque<String> },
     LLEN(String),
     LPOP{ key: String, length: Option<usize> },
-    BLPOP{ key: String, timeout_ms: Option<i64> },
+    BLPOP{ key: String, timeout_ms: Option<u64> },
     TYPE(String),
     XADD{ key: String, id: (Option<u64>, Option<u64>), value: Vec<String>},
     XRANGE{ key: String, start: (u64, u64), end: (u64, u64)},
@@ -151,6 +152,7 @@ pub enum Cmd {
     PSYNC{ id: String, offset: i64},
     FULLRESYNC { id: String, offset: i64},
     RDB(Vec<u8>),
+    WAIT { count: u64, timeout_ms: Option<u64> },
 }
 
 impl Cmd {
@@ -316,13 +318,13 @@ impl Cmd {
             .ok_or(CmdError::MissingArgument("No key provided for BLPOP".to_string()))?
             .get_value().unwrap().str().unwrap();
         
-        let timeout_ms: i64 = values.pop_front()
+        let timeout_ms: u64 = values.pop_front()
             .ok_or(CmdError::MissingArgument("No timeout provided for BLPOP".to_string()))?
             .get_value().unwrap().str().unwrap()
             .parse::<f64>()
             .map_err(
                 |_| CmdError::ParseError("timeout for BLPOP".to_string())
-            ).map(|x| (x * 1000.0) as i64)?;
+            ).map(|x| (x * 1000.0) as u64)?;
         
         if timeout_ms < 0 {
             Err(CmdError::InvalidArgument("Error while parsing expiration for BLPOP".to_string()))
@@ -634,6 +636,27 @@ impl Cmd {
         }
     } 
 
+    pub fn wait(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+        let count: u64 = values.pop_front()
+            .ok_or(CmdError::MissingArgument("No count provided for WAIT".to_string()))?
+            .get_value().unwrap().str().unwrap()
+            .parse::<u64>()
+            .map_err(
+                |_| CmdError::ParseError("count for WAIT".to_string())
+            )?;
+
+        let timeout_ms: Option<u64> = values.pop_front()
+            .ok_or(CmdError::MissingArgument("no timeout provided for WAIT".to_string()))?
+            .get_value().unwrap().str().unwrap()
+            .parse::<u64>()
+            .map_err(
+                |_| CmdError::ParseError("timeout for WAIT".to_string())
+            ).map(|x| { if x <= 0 { None } else { Some(x) }})?;
+        
+        Ok(Cmd::WAIT { count, timeout_ms })
+
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -720,7 +743,9 @@ impl Cmd {
                                         s if s == KW_PSYNC => {
                                             return Self::psync(v)
                                         },
-                                        
+                                        s if s == KW_WAIT => {
+                                            return Self::wait(v)
+                                        },
                                         _ => return Err(
                                             CmdError::InvalidArgument("Invalid command".to_string()))
                                     } 
