@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet, btree_map};
 use std::collections::{HashMap, VecDeque, hash_map::Entry };
-use std::iter;
+use std::{iter, u64};
 use std::ops::Bound::{Included, Excluded, Unbounded};
 use std::rc::Rc;
 use std::str::from_utf8;
@@ -1592,6 +1592,16 @@ impl CmdHandler {
         if count == 0 {
             // First case  
             let resp_count = RespType::Integer(Some(0));
+            return Ok(Some(resp_count))
+        };
+
+        // Short-circuit condition: if master offset = 0, return nbr of replicas
+        if AppStates::get().host_stats.as_ref().unwrap().offset.load() < 0 {
+            let slave_count = match &ClientTable::get().borrow().slaves {
+                Some(h) => h.len(),
+                None => 0
+            };
+            let resp_count = RespType::Integer(Some(slave_count as i64));
             return Ok(Some(resp_count))
         };
     

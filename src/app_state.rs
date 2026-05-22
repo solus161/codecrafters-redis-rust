@@ -107,7 +107,7 @@ impl AppStates {
             Some(port.unwrap_or(6379)),
         );
         let master_repl = ReplStats::parse_replicaof(replica_stats);
-
+        
         let _ = APP_STATES.set(Self{ host_stats: Some(host_resp), master_stats: master_repl});
     }
 

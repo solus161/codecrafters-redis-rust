@@ -176,10 +176,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             v if v as i32 & libc::EPOLLIN == libc::EPOLLIN => {
                                 match client.read_socket() {
                                     Ok(()) => {
-                                        // Register the epoll again
-                                        epoll::modify_interest(
-                                            epoll_fd, key as i32, 
-                                            epoll::get_epoll_event_read(key))?;
+                                        // Re-register epoll. ENOENT means the command parked
+                                        // the client (WAIT/BLPOP/XREAD BLOCK called remove_interest),
+                                        // so skip re-registering in that case.
+                                        if let Err(e) = epoll::modify_interest(
+                                            epoll_fd, key as i32,
+                                            epoll::get_epoll_event_read(key))
+                                        {
+                                            if e.kind() != io::ErrorKind::NotFound {
+                                                return Err(e.into());
+                                            }
+                                        }
                                     },
                                     Err(boxed_e) => {
                                         println!("Error with client fd {}: {:?}", key, boxed_e);
