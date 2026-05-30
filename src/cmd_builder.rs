@@ -4,6 +4,7 @@ use std::string::ParseError;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::u64;
 
+use crate::exceptions::CustomError;
 use crate::resp::{ ParseStatus, RespType, RespValue };
 use crate::epoll::timer_create_event;
 use crate::utils::now;
@@ -48,6 +49,7 @@ pub const KW_FULLRESYNC: &str = "FULLRESYNC";
 pub const KW_GETACK: &str = "GETACK";
 pub const KW_ACK: &str = "ACK";
 pub const KW_WAIT: &str = "WAIT";
+const KW_CONFIG: &str = "CONFIG";
 
 //-------Customed error for command construction and handling
 #[derive(Debug)]
@@ -86,24 +88,22 @@ pub enum CmdArg {
     Capa(String),
     GETACK(String),
     ACK(i64),
+    GET(String),
 }
 
 impl CmdArg {
-    fn set(key: String, value: String) -> Result<Self, CmdError> {
+    fn set(key: String, value: String) -> Result<Self, CustomError> {
         match key {
             k if k == KW_EX => {
-                let x = value.parse::<u64>()
-                    .map_err(|_| CmdError::ParseError("expiration value".to_string()))?;
+                let x = value.parse::<u64>()?;
                 Ok(Self::EX(Some(x)))
             },
             k if k == KW_PX => {
-                let x = value.parse::<u64>()
-                    .map_err(|_| CmdError::ParseError("expiration value".to_string()))?;
+                let x = value.parse::<u64>()?;
                 Ok(Self::PX(Some(x)))
             },
             k if k == KW_LISTENING_PORT => {
-                let x = value.parse::<u16>()
-                    .map_err(|_| CmdError::ParseError("expiration value".to_string()))?;
+                let x = value.parse::<u16>()?;
                 Ok(Self::ListeningPort(x))
             },
             k if k == KW_CAPA => {
@@ -113,11 +113,13 @@ impl CmdArg {
                 Ok(Self::GETACK(value))
             },
             k if k == KW_ACK => {
-                let x = value.parse::<i64>()
-                    .map_err(|_| CmdError::ParseError("expiration value".to_string()))?;
+                let x = value.parse::<i64>()?;
                 Ok(Self::ACK(x))
             },
-            _ => Err(CmdError::InvalidArgument(format!("Invalid arg for {}", &key))),
+            k if k == KW_GET => {
+                Ok(Self::GET(value))
+            },
+            _ => Err(CustomError::InvalidArgument(format!("Invalid arg for {}", &key))),
         }
     }
 }
@@ -153,6 +155,7 @@ pub enum Cmd {
     FULLRESYNC { id: String, offset: i64},
     RDB(Vec<u8>),
     WAIT { count: u64, timeout_ms: Option<u64> },
+    CONFIG(CmdArg),
 }
 
 impl Cmd {
@@ -176,41 +179,46 @@ impl Cmd {
         }
     }
 
-    fn ping() -> Result<Self, CmdError> { Ok(Self::PING) }
-    fn pong() -> Result<Self, CmdError> { Ok(Self::PONG) }
-    fn ok() -> Result<Self, CmdError> { Ok(Self::OK) }
-    fn echo(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    fn ping() -> Result<Self, CustomError> { Ok(Self::PING) }
+    fn pong() -> Result<Self, CustomError> { Ok(Self::PONG) }
+    fn ok() -> Result<Self, CustomError> { Ok(Self::OK) }
+    fn echo(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg = "No argument provided for ECHO";
         let s: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument(
-                    "No argument provided for ECHO".to_string()))?
-            .get_value()
-            .ok_or(CmdError::ParseError("ECHO".to_string()))?
-            .str()
-            .ok_or(CmdError::ParseError("ECHO".to_string()))?;
+            .ok_or(CustomError::MissingArgument(msg.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg.to_string()))?;
         return Ok(Self::ECHO(s));
     }
     
-    fn set(mut values: VecDeque<RespType> ) -> Result<Self, CmdError> {
+    fn set(mut values: VecDeque<RespType> ) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for SET";
         let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for SET".to_string()))?
-            .get_value().unwrap()
-            .str().unwrap();
-
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        
+        let msg_value = "No value provided for SET";
         let value: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No value provided for SET".to_string()))?
-            .get_value().unwrap()
-            .str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg_value.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_value.to_string()))?;
 
+        // Parsing expiration arg
+        let msg_exp_key = "No arg provided for expiration";
+        let msg_exp_value = "No value provided for expiration";
         match values.pop_front() {
             // Having option
             Some(o) => {
-                let expire_key: String = o.get_value().unwrap().str().unwrap();        
+                let expire_key: String = o.get_str()
+                    .ok_or(CustomError::MissingArgument(msg_exp_key.to_string()))?;        
                 let expire_value: String = match values.pop_front() {
                     Some(o) => {
                         // TODO: handle conversion error
-                        o.get_value().unwrap().str().unwrap() 
+                        o.get_str()
+                            .ok_or(CustomError::MissingArgument(msg_exp_value.to_string()))? 
                     },
-                    None => return Err(CmdError::MissingArgument("No expiration provided".to_string()))
+                    None => return Err(CustomError::MissingArgument(msg_exp_value.to_string()))
                 };
                 let opt = CmdArg::set(expire_key, expire_value)?;
                 Ok(Self::SET{ key: key, value: value, opt: Some(opt) })
@@ -220,92 +228,100 @@ impl Cmd {
         }
     }
 
-    fn get(mut values: VecDeque<RespType>) -> Result<Self, CmdError>{
+    fn get(mut values: VecDeque<RespType>) -> Result<Self, CustomError>{
+        let msg = "No key provided for GET";
         let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for GET".to_string()))?
-            .get_value().unwrap().str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg.to_string()))?;
         Ok(Cmd::GET{ key })
     }
 
-    fn rpush(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    fn rpush(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for RPUSH";
         let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for RPUSH".to_string()))?
-            .get_value().unwrap().str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
         
+        let msg_value = "No value provided for RPUSH";
         let mut list_values: Vec<String> = Vec::new();
         while !values.is_empty() {
             // Pop from values, extract String, push to list_values
             let v = values.pop_front()
-                .ok_or(CmdError::MissingArgument("No value provided for RPUSH".to_string()))?
-                .get_value().unwrap()
-                .str().unwrap();
+                .ok_or(CustomError::MissingArgument(msg_value.to_string()))?
+                .get_str()
+                .ok_or(CustomError::MissingArgument(msg_value.to_string()))?;
             list_values.push(v);
         };
         Ok(Cmd::RPUSH { key, value: list_values })
     }
     
-    fn lrange(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    fn lrange(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for LRANGE";
         let key: String = values.pop_front()
-            .ok_or(
-                CmdError::MissingArgument(
-                    "No key provided for LRANGE".to_string()))?
-            .get_value().unwrap().str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        
+        let msg_start_index = "No start index provided for LRANGE";
         let start: i64 = values.pop_front()
-            .ok_or(
-                CmdError::MissingArgument(
-                    "No start index provided for LRANGE".to_string()))?
-            .get_value().unwrap().str().unwrap()
-            .parse().map_err(
-                |_| CmdError::InvalidArgument(
-                    "Error while parsing start index for LRANGE".to_string()))?;
+            .ok_or(CustomError::MissingArgument(msg_start_index.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_start_index.to_string()))?
+            .parse()?;
+
+        let msg_stop_index = "No end index provided for LRANGE";
         let stop: i64 = values.pop_front()
-            .ok_or(
-                CmdError::MissingArgument(
-                    "No end index provided for LRANGE".to_string()))?
-            .get_value().unwrap().str().unwrap()
-            .parse().map_err(
-                |_| CmdError::InvalidArgument(
-                    "Error while parsing end index for LRANGE".to_string()))?;
+            .ok_or(CustomError::MissingArgument(msg_stop_index.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_stop_index.to_string()))?
+            .parse()?;
         Ok(Self::LRANGE { key, start, stop })
     }
     
-    fn lpush(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    fn lpush(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for LPUSH";
         let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for LPUSH".to_string()))?
-            .get_value().unwrap().str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
         
+        let msg_value = "No value provided for LPUSH";
         let mut list_values: VecDeque<String> = VecDeque::new();
         while !values.is_empty() {
             // Pop from values, extract String, push to list_values
             let v = values.pop_front()
-                .ok_or(CmdError::MissingArgument("No value provided for LPUSH".to_string()))?
-                .get_value().unwrap()
-                .str().unwrap();
+                .ok_or(CustomError::MissingArgument(msg_value.to_string()))?
+                .get_str()
+                .ok_or(CustomError::MissingArgument(msg_value.to_string()))?;
             list_values.push_back(v);
         };
         Ok(Cmd::LPUSH { key, value: list_values })
     }
 
-    fn llen(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    fn llen(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg = "No key provided for LLEN";
         let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for LLEN".to_string()))?
-            .get_value().unwrap().str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg.to_string()))?;
         Ok(Cmd::LLEN(key))
     }
 
-    fn lpop(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    fn lpop(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for LPOP";
         let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for LPOP".to_string()))?
-            .get_value().unwrap().str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
         
+        let msg_value = "No length provided for LPOP";
         let length: Option<usize> = match values.pop_front() {
             Some(s) => {
-                match s.get_value().unwrap().str().unwrap()
-                    .parse::<usize>() {
-                    Ok(x) => Some(x),
-                    Err(_) => return
-                        Err(CmdError::InvalidArgument("Error while parsing length for LPOP".to_string()))
-                    }
+                Some(s.get_str()
+                    .ok_or(CustomError::MissingArgument(msg_value.to_string()))?
+                    .parse()?)
             },
             None => None
         };
@@ -313,36 +329,40 @@ impl Cmd {
         Ok(Cmd::LPOP{ key, length })
     }
 
-    fn blpop(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    fn blpop(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for BLPOP";
         let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for BLPOP".to_string()))?
-            .get_value().unwrap().str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
         
-        let timeout_ms: u64 = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No timeout provided for BLPOP".to_string()))?
-            .get_value().unwrap().str().unwrap()
-            .parse::<f64>()
-            .map_err(
-                |_| CmdError::ParseError("timeout for BLPOP".to_string())
-            ).map(|x| (x * 1000.0) as u64)?;
+        let msg_timeout = "No timeout provided for BLPOP";
+        let timeout_ms: f64 = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_timeout.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_timeout.to_string()))?
+            .parse::<f64>()? * 1000.0;
         
-        if timeout_ms < 0 {
-            Err(CmdError::InvalidArgument("Error while parsing expiration for BLPOP".to_string()))
-        } else if timeout_ms == 0 {
+        let msg_timeout_invalid = "Error while parsing expiration for BLPOP";
+        if timeout_ms < 0.0 {
+            Err(CustomError::InvalidArgument(msg_timeout_invalid.to_string()))
+        } else if timeout_ms == 0.0 {
             Ok(Self::BLPOP { key, timeout_ms: None })
         } else {
-            Ok(Self::BLPOP { key, timeout_ms: Some(timeout_ms) })
+            Ok(Self::BLPOP { key, timeout_ms: Some(timeout_ms as u64) })
         }
     }
     
-    fn ktype(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    fn ktype(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for TYPE";
         let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for TYPE".to_string()))?
-            .get_value().unwrap().str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
         Ok(Self::TYPE(key))
     }
 
-    fn _parse_stream_id_xadd(value: String) -> Result<(Option<u64>, Option<u64>), CmdError> {
+    fn _parse_stream_id_xadd(value: String) -> Result<(Option<u64>, Option<u64>), CustomError> {
         // Parse timestamp id of stream
         let id: (Option<u64>, Option<u64>);
         if value == "*".to_string() {
@@ -350,62 +370,59 @@ impl Cmd {
         
         } else {
             let vec_splitted: Vec<&str> = value.split('-').collect();
+            let msg_ts = "Error while parsing stream id for XADD";
             match vec_splitted.as_slice() {
                 [t, i] => {
-                    let ts: Option<u64> = Some(t.parse::<u64>().map_err(
-                        |_| CmdError::InvalidArgument("Error while parsing stream id for XADD".to_string())
-                    )?);
+                    
+                    let ts: Option<u64> = Some(t.parse::<u64>()?);
 
                     if *i == "*".to_string() {
                         id = (ts, None);  
                     } else {
-                        let idx: Option<u64> = Some(i.parse::<u64>().map_err(
-                            |_| CmdError::InvalidArgument("Error while parsing stream id for XADD".to_string())
-                        )?);
+                        let idx: Option<u64> = Some(i.parse::<u64>()?);
                         id = (ts, idx)
                     }
                 },
-                _ => return Err(CmdError::InvalidArgument("Error while parsing stream id for XADD".to_string()))
+                _ => return Err(CustomError::InvalidArgument(msg_ts.to_string()))
             };
         };
         Ok(id)
     }
 
-    fn xadd(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    fn xadd(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for XADD";
         let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for XADD".to_string()))?
-            .get_value().unwrap().str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+
+        let msg_time_id = "No time id provided for XADD";
         let timestamp_id: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No timeid provided for XADD".to_string()))?
-            .get_value().unwrap().str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg_time_id.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_time_id.to_string()))?;
 
         // Parse timestamp_id
         let id = Self::_parse_stream_id_xadd(timestamp_id)?; 
         let mut value: Vec<String> = Vec::new();
         for v in values {
-            value.push(v.get_value().unwrap().str().unwrap());
+            value.push(v.get_str().ok_or(
+                    CustomError::MissingArgument("Invalide key-value pair providec".to_string())
+            )?);
         };
         Ok(Self::XADD { key, id, value })
     }
 
-    fn _parse_stream_id(value: String, end: bool) -> Result<(u64, u64), CmdError> {
+    fn _parse_stream_id(value: String, end: bool) -> Result<(u64, u64), CustomError> {
         let vec_splitted: Vec<&str> = value.split('-').collect();
         let id = match vec_splitted.as_slice() {
             [t, i] => {
-                let ts: u64 = t.parse::<u64>().map_err(
-                    |_| CmdError::InvalidArgument("Error while parsing stream id".to_string())
-                )?;
-
-                let idx: u64 = i.parse::<u64>().map_err(
-                    |_| CmdError::InvalidArgument("Error while parsing stream id".to_string())
-                )?;
-
+                let ts: u64 = t.parse::<u64>()?;
+                let idx: u64 = i.parse::<u64>()?;
                 (ts, idx)
             },
             [t] => {
-                let ts: u64 = t.parse::<u64>().map_err(
-                    |_| CmdError::InvalidArgument("Error while parsing stream id".to_string())
-                )?;
+                let ts: u64 = t.parse::<u64>()?;
                 
                 if !end {
                     (ts, 0)
@@ -414,12 +431,12 @@ impl Cmd {
                 }
                 
             }
-            _ => return Err(CmdError::InvalidArgument("Error while parsing stream id".to_string()))
+            _ => return Err(CustomError::InvalidArgument("Error while parsing stream id".to_string()))
         };
         Ok(id)
     }
     
-    fn _parse_stream_id_xrange(value: String, end: bool) -> Result<(u64, u64), CmdError> {
+    fn _parse_stream_id_xrange(value: String, end: bool) -> Result<(u64, u64), CustomError> {
         // Parse timestamp id of stream
         if value == "-" {
             return Ok((0, 0))
@@ -432,25 +449,31 @@ impl Cmd {
         Self::_parse_stream_id(value, end)
     }
 
-    fn _parse_stream_id_xread(value: String) -> Result<(u64, u64), CmdError> {
+    fn _parse_stream_id_xread(value: String) -> Result<(u64, u64), CustomError> {
         if value == "$" {
             return Ok((u64::MAX, u64::MAX));
         };
         Self::_parse_stream_id(value, false)
     }
 
-    fn xrange(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    fn xrange(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for XRANGE";
         let key: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No key provided for XRANGE".to_string()))?
-            .get_value().unwrap().str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
 
+        let msg_start_index = "No start id provided for XRANGE";
         let start_id: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No start id provided for XRANGE".to_string()))?
-            .get_value().unwrap().str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg_start_index.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_start_index.to_string()))?;
     
+        let msg_end_index = "No start id provided for XRANGE";
         let end_id: String = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No start id provided for XRANGE".to_string()))?
-            .get_value().unwrap().str().unwrap();
+            .ok_or(CustomError::MissingArgument(msg_end_index.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_end_index.to_string()))?;
 
         // Extract start id
         let start = Self::_parse_stream_id_xrange(start_id, false)?;
@@ -459,7 +482,7 @@ impl Cmd {
         Ok(Self::XRANGE { key, start, end })
     }
 
-    fn xread(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    fn xread(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
         let mut count = None;
         let mut stream: Vec<(String, u64, u64)> = Vec::new();
         let mut block_ms: Option<u64> = None;
@@ -468,24 +491,29 @@ impl Cmd {
         let mut has_block = false;
 
         let parse_u64_arg = |kw: &str, values: &mut VecDeque<RespType>|
-            -> Result<u64, CmdError> {
-            values.pop_front()
-                .ok_or(CmdError::MissingArgument("No argument provided for COUNT".to_string()))?
-                .get_value().unwrap().str().unwrap()
-                .parse::<u64>().map_err( |_|
-                    CmdError::ParseError(format!("value for {kw}"))
-                )
+            -> Result<u64, CustomError> {
+            let msg = "No argument provided for COUNT";
+            Ok(values.pop_front()
+                .ok_or(CustomError::MissingArgument(msg.to_string()))?
+                .get_str()
+                .ok_or(CustomError::MissingArgument(msg.to_string()))?
+                .parse::<u64>()?)
         };
         
         // COUNT or BLOCK could come first
         loop {
+            let msg = "No argument provided for XREAD";
             let first = values.pop_front()
-                .ok_or(CmdError::MissingArgument("No argument provided for XREAD".to_string()))?
-                .get_value().unwrap().str().unwrap().to_uppercase();
+                .ok_or(CustomError::MissingArgument(msg.to_string()))?
+                .get_str()
+                .ok_or(CustomError::MissingArgument(msg.to_string()))?
+                .to_uppercase();
+
             if first == KW_COUNT {
                 if has_count {
+                    let msg = "Cannot have more than two COUNT";
                     return Err(
-                        CmdError::UnsupportedCmdStructure
+                        CustomError::UnsupportedCmdStructure(msg.to_string())
                     )
                 };
 
@@ -494,8 +522,9 @@ impl Cmd {
                 has_count = true;
             } else if first == KW_BLOCK {
                 if has_block {
+                    let msg = "Cannot have more than two BLOCK";
                     return Err(
-                        CmdError::UnsupportedCmdStructure
+                        CustomError::UnsupportedCmdStructure(msg.to_string())
                     )
                 };
 
@@ -503,8 +532,9 @@ impl Cmd {
                 block_ms = Some(second);
                 has_block = true;
             } else if first != KW_STREAMS {
+                let msg = "Wrong argument";
                 return Err(
-                    CmdError::UnsupportedCmdStructure
+                    CustomError::UnsupportedCmdStructure(msg.to_string())
                 )
             } else {
                 break;
@@ -514,8 +544,9 @@ impl Cmd {
         // Parse STREAMS key1 key2 .. id1 id2
         if values.len() & 1 == 1 {
             // Nbr of key id must be even
+            let msg = "Not sufficient key-pair values";
             return Err(
-                CmdError::UnsupportedCmdStructure
+                CustomError::UnsupportedCmdStructure(msg.to_string())
             )
         };
 
@@ -525,15 +556,17 @@ impl Cmd {
         
         // let keys: VecDeque<String> = values.drain(..pair_len).collect();
         // let mut keyskeys.extend(values.drain(..pair_len));
-        values.drain(..pair_len).for_each(|t| {
-            keys.push_back(
-                t.get_value().unwrap().str().unwrap()
-                )
-        });
+        values.drain(..pair_len).try_for_each(|t| -> Result<(), CustomError> {
+            let key = t.get_str()
+                .ok_or(CustomError::MissingArgument("Key not provided".to_string()))?;
+            keys.push_back(key);
+            Ok(())
+        })?;
         
-        values.drain(..pair_len).try_for_each(|t| {
-            let (t, i) = Self::_parse_stream_id_xread(
-                t.get_value().unwrap().str().unwrap())?;
+        values.drain(..pair_len).try_for_each(|t| -> Result<(), CustomError> {
+            let value = t.get_str()
+                .ok_or(CustomError::MissingArgument("Value not provided".to_string()))?;
+            let (t, i) = Self::_parse_stream_id_xread(value)?;
             ids.push_back((t, i));
             Ok(())
         })?;
@@ -551,119 +584,160 @@ impl Cmd {
         Ok(Self::XREAD { count, block_ms, stream })
     }
     
-    pub fn incr(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    pub fn incr(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg = "No key provided for INCR";
         let key: String = values.pop_front()
-           .ok_or(CmdError::MissingArgument("No key provided for INCR".to_string()))?
-           .get_value().unwrap().str().unwrap();
+           .ok_or(CustomError::MissingArgument(msg.to_string()))?
+           .get_str()
+           .ok_or(CustomError::MissingArgument(msg.to_string()))?;
         Ok(Self::INCR(key))
     }
 
-    pub fn multi() -> Result<Self, CmdError> {
+    pub fn multi() -> Result<Self, CustomError> {
         Ok(Self::MULTI)
     }
 
-    pub fn exec() -> Result<Self, CmdError> {
+    pub fn exec() -> Result<Self, CustomError> {
         Ok(Self::EXEC)
     }
 
-    pub fn discard() -> Result<Self, CmdError> {
+    pub fn discard() -> Result<Self, CustomError> {
         Ok(Self::DISCARD)
     }
 
-    pub fn watch(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    pub fn watch(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key ="Invalid key for WATCH";
         let mut keys: Vec<String> = Vec::new();
-        values.drain(..).for_each(|v| keys.push(v.get_value().unwrap().str().unwrap()));
+        values.drain(..).try_for_each(|v: RespType| -> Result<(), CustomError> {
+            keys.push(
+                v.get_str()
+                .ok_or(CustomError::MissingArgument(msg_key.to_string()))?);
+            Ok(()) 
+        });
         if keys.is_empty() {
-            Err(CmdError::MissingArgument("No key provided for WATCH".to_string()))
+            let msg = "No key provided for WATCH";
+            Err(CustomError::MissingArgument(msg.to_string()))
         } else {
             Ok(Self::WATCH(keys))
         }
     }
 
-    pub fn unwatch() -> Result<Self, CmdError> {
+    pub fn unwatch() -> Result<Self, CustomError> {
         Ok(Self::UNWATCH)
     }
 
-    pub fn info(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    pub fn info(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg = "No key provided for INFO";
         let key: String = values.pop_front()
-           .ok_or(CmdError::MissingArgument("No key provided for INFO".to_string()))?
-           .get_value().unwrap().str().unwrap();
+           .ok_or(CustomError::MissingArgument(msg.to_string()))?
+           .get_str()
+           .ok_or(CustomError::MissingArgument(msg.to_string()))?;
         Ok(Self::INFO(key))
     }
 
-    pub fn replconf(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    pub fn replconf(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for REPLCONF";
         let arg: String = values.pop_front()
-           .ok_or(CmdError::MissingArgument("No key provided for REPLCONF".to_string()))?
-           .get_value().unwrap().str().unwrap();
+           .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+           .get_str()
+           .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+
+        let msg_value = "No value provided for REPLCONF";
         let value: String = values.pop_front()
-           .ok_or(CmdError::MissingArgument("No value provided for REPLCONF".to_string()))?
-           .get_value().unwrap().str().unwrap();
+           .ok_or(CustomError::MissingArgument(msg_value.to_string()))?
+           .get_str()
+           .ok_or(CustomError::MissingArgument(msg_value.to_string()))?;
         let opt = CmdArg::set(arg, value)?;
         Ok(Self::REPLCONF(opt))
     }
 
-    pub fn psync(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    pub fn psync(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_id = "No id provided for PSYNC";
         let id: String = values.pop_front()
-           .ok_or(CmdError::MissingArgument("No id provided for PSYNC".to_string()))?
-           .get_value().unwrap().str().unwrap();
+           .ok_or(CustomError::MissingArgument(msg_id.to_string()))?
+           .get_str()
+           .ok_or(CustomError::MissingArgument(msg_id.to_string()))?;
         
+        let msg_offset = "No offset provided for PSYNC";
         let offset: i64 = values.pop_front()
-           .ok_or(CmdError::MissingArgument("No offset provided for PSYNC".to_string()))?
-           .get_value().unwrap().str().unwrap()
-           .parse().map_err(|_| CmdError::ParseError("offset for PSYNC".to_string()))?;
+           .ok_or(CustomError::MissingArgument(msg_offset.to_string()))?
+           .get_str()
+            .ok_or(CustomError::MissingArgument(msg_offset.to_string()))?
+           .parse()?;
         
         Ok(Self::PSYNC{ id, offset })
     }
 
-    pub fn fullresync(s: String) -> Result<Self, CmdError> {
+    pub fn fullresync(s: String) -> Result<Self, CustomError> {
         let mut s_iter = s.split(" "); 
         s_iter.next();
+
+        let msg_id = "No id provided for FULLRESYNC";
         let id: String = s_iter.next()
-           .ok_or(CmdError::MissingArgument("No id provided for FULLRESYNC".to_string()))?
+           .ok_or(CustomError::MissingArgument(msg_id.to_string()))?
            .to_string();
         
+        let msg_offset = "No offset provided for FULLRESYNC";
         let offset: i64 = s_iter.next()
-           .ok_or(CmdError::MissingArgument("No offset provided for FULLRESYNC".to_string()))?
-           .parse().map_err(|_| CmdError::ParseError("offset for FULLRESYNC".to_string()))?;
+           .ok_or(CustomError::MissingArgument(msg_offset.to_string()))?
+           .parse()?;
 
         Ok(Self::FULLRESYNC { id, offset })
     }
 
-    pub fn rdb(v: Option<Vec<u8>>) -> Result<Self, CmdError> {
+    pub fn rdb(v: Option<Vec<u8>>) -> Result<Self, CustomError> {
         match v {
             Some(b) => Ok(Self::RDB(b)),
-            None => Err(CmdError::UnprocessableError("RBD stream is empty".to_string()))
+            None => Err(CustomError::UnprocessableError("RBD stream is empty".to_string()))
         }
     } 
 
-    pub fn wait(mut values: VecDeque<RespType>) -> Result<Self, CmdError> {
+    pub fn wait(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_count = "No count provided for WAIT";
         let count: u64 = values.pop_front()
-            .ok_or(CmdError::MissingArgument("No count provided for WAIT".to_string()))?
-            .get_value().unwrap().str().unwrap()
-            .parse::<u64>()
-            .map_err(
-                |_| CmdError::ParseError("count for WAIT".to_string())
-            )?;
+            .ok_or(CustomError::MissingArgument(msg_count.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_count.to_string()))?
+            .parse()?;
 
-        let timeout_ms: Option<u64> = values.pop_front()
-            .ok_or(CmdError::MissingArgument("no timeout provided for WAIT".to_string()))?
-            .get_value().unwrap().str().unwrap()
-            .parse::<u64>()
-            .map_err(
-                |_| CmdError::ParseError("timeout for WAIT".to_string())
-            ).map(|x| { if x <= 0 { None } else { Some(x) }})?;
+        let msg_timeout = "No timeout provided for WAIT";
+        let timeout_ms: u64 = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_timeout.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_timeout.to_string()))?
+            .parse::<u64>()?;
         
-        Ok(Cmd::WAIT { count, timeout_ms })
-
+        if timeout_ms <= 0 {
+            Ok(Cmd::WAIT { count, timeout_ms: None })
+        } else {
+            Ok(Cmd::WAIT { count, timeout_ms: Some(timeout_ms) })
+        }
     }
 
-    pub fn from_resp(resp_type: RespType) -> Result<Self, CmdError> {
+    pub fn config(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_arg = "No arg provided for CONFIG";
+        let arg = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_arg.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_arg.to_string()))?;
+        
+        let msg_value = "No value provided for CONFIG";
+        let value = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_value.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_value.to_string()))?;
+
+        let opt = CmdArg::set(arg, value)?;
+        Ok(Cmd::CONFIG(opt))
+    }
+
+    pub fn from_resp(resp_type: RespType) -> Result<Self, CustomError> {
         // Instantiate Cmd from RespType
         match resp_type {
             RespType::Array{ length, value } => {
                 // Iterate through the array to construct Cmd
                 // A command is always in array form
-                if length == 0 { return Err(CmdError::NoCmdError) };
+                if length == 0 { return Err(CustomError::NoCmdError("No command".to_string())) };
 
                 // First item must be cmd type
                 if  let Some(mut v) = value {
@@ -671,7 +745,9 @@ impl Cmd {
                         Some(o) => {
                             match o {
                                 RespType::BulkStr { length, value } => {
-                                    if length == 0 { return Err(CmdError::NoCmdError) };
+                                    if length == 0 {
+                                        return Err(CustomError::NoCmdError("No command".to_string()))
+                                    };
 
                                     match value.unwrap().to_uppercase() {
                                         s if s == KW_PING => {
@@ -746,17 +822,20 @@ impl Cmd {
                                         s if s == KW_WAIT => {
                                             return Self::wait(v)
                                         },
+                                        s if s == KW_CONFIG => {
+                                            return Self::config(v)
+                                        }
                                         _ => return Err(
-                                            CmdError::InvalidArgument("Invalid command".to_string()))
+                                            CustomError::InvalidArgument("Invalid command".to_string()))
                                     } 
                                 },
-                                _ => return Err(CmdError::InvalidArgument("Invalid command".to_string()))
+                                _ => return Err(CustomError::InvalidArgument("Invalid command".to_string()))
                             }            
                         },
-                        None => return Err(CmdError::NoCmdError) 
+                        None => return Err(CustomError::NoCmdError("No command provided".to_string())) 
                     };
                 };
-                return Err(CmdError::NoCmdError);
+                return Err(CustomError::NoCmdError("No command provided".to_string()));
             },
             RespType::SimpleStr(o) => {
                 match o.unwrap().to_uppercase() {
@@ -770,11 +849,11 @@ impl Cmd {
                             return Self::fullresync(s)
                         },
                     _ => return Err(
-                        CmdError::InvalidArgument("Invalid command".to_string()))
+                        CustomError::InvalidArgument("Invalid command".to_string()))
                 }
             },
             RespType::RDB(o) => Self::rdb(o),
-            _ => return Err(CmdError::UnsupportedCmdStructure),
+            _ => return Err(CustomError::UnsupportedCmdStructure("Unsupported structure".to_string())),
         }
     }
 }

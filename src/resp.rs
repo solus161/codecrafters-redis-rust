@@ -6,6 +6,8 @@ use std::str;
 use std::thread;
 use std::time::Duration;
 
+use crate::exceptions::CustomError;
+
 #[derive(Debug)]
 pub enum ParseStatus {
     None,           // Currently parsing nothing, wait for a type prefix
@@ -536,27 +538,47 @@ impl RespType {
         
     }
 
-    pub fn get_value(self) -> Option<RespValue>{
-        // Get the inner value of simple type, bulk type, scalar type
-        // Destroy the struct in process
+    // pub fn get_value(self) -> Option<RespValue>{
+    //     // Get the inner value of simple type, bulk type, scalar type
+    //     // Destroy the struct in process
+    //     match self {
+    //         Self::SimpleStr(o) => {
+    //             if let Some(s) = o {
+    //                 return Some(RespValue::Str(s))
+    //             } else {
+    //                 return None
+    //             };
+    //         },
+    //         Self::Integer(o) => {
+    //             if let Some(x) = o {
+    //                 return Some(RespValue::Integer(x as i64))
+    //             } else {
+    //                 return None
+    //             };
+    //         },
+    //         Self::BulkStr { value, .. } => {
+    //             if let Some(s) = value {
+    //                 return Some(RespValue::Str(s));
+    //             } else {
+    //                 return None
+    //             }
+    //         },
+    //         _ => { return None }
+    //     }
+    // }
+
+    pub fn get_str(self) -> Option<String> {
         match self {
             Self::SimpleStr(o) => {
                 if let Some(s) = o {
-                    return Some(RespValue::Str(s))
-                } else {
-                    return None
-                };
-            },
-            Self::Integer(o) => {
-                if let Some(x) = o {
-                    return Some(RespValue::Integer(x as i64))
+                    return Some(s)
                 } else {
                     return None
                 };
             },
             Self::BulkStr { value, .. } => {
                 if let Some(s) = value {
-                    return Some(RespValue::Str(s));
+                    return Some(s);
                 } else {
                     return None
                 }
@@ -565,7 +587,20 @@ impl RespType {
         }
     }
 
-    pub fn serialize(&self) -> Option<String> {
+    pub fn get_int(self) -> Option<i64> {
+        match self {
+            Self::Integer(o) => {
+                if let Some(x) = o {
+                    return Some(x)
+                } else {
+                    return None
+                };
+            },
+            _ => { return None }
+        }
+    }
+
+    fn serialize(&self) -> Option<String> {
         let prefix = self.get_prefix().to_string();
         match self {
             Self::Array { length, value } => {
@@ -637,3 +672,8 @@ impl RespType {
     }
 }
 
+impl From<CustomError> for RespType {
+    fn from(e: CustomError) -> Self {
+        e.into_resp() 
+    }
+}

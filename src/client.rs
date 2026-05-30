@@ -8,6 +8,7 @@ use std::str::from_utf8;
 
 use base64::write;
 
+use crate::exceptions::{CustomError, ERR_HOST_STATS_NOT_INITIATED, ERR_MASTER_STATS_PORT_NOT_SET};
 use crate::{ AppStates, ReplStats };
 use crate::cmd_handler::CmdHandler; 
 use crate::cmd_builder::{
@@ -54,7 +55,6 @@ pub struct TcpClient {
     // repl_status: ReplStatus,
     repl_state: ReplState,
     parse_rdb: bool,
-    blocked_read: bool,     // defer any buffer consumed
 }
 
 pub const BUFFER_SIZE: i32 = 4096;
@@ -75,7 +75,6 @@ impl TcpClient {
             // repl_status: ReplStatus::None,
             repl_state: ReplState::new(),
             parse_rdb: false,
-            blocked_read: false,
         }
     }
 
@@ -135,7 +134,8 @@ impl TcpClient {
                             }
                         },
                         Err(e) => {
-                            response = self.cmd_handler.borrow_mut().handle(Err(e), buf, self.client_fd, self.epoll_fd) 
+                            response = self.cmd_handler.borrow_mut()
+                                .handle(Err(e), buf, self.client_fd, self.epoll_fd) 
                             // return Err(Box::new(e)),
                         }
                     };
@@ -191,7 +191,10 @@ impl TcpClient {
                 self.parse_rdb = false;
                 
                 // After this, server starts counting for bytes from master
-                AppStates::get().host_stats.as_ref().unwrap().start_bytes_count();
+                AppStates::get().get_host_stats()
+                    .ok_or_else(||
+                        CustomError::InternalError(ERR_HOST_STATS_NOT_INITIATED.to_string()))?
+                        .start_bytes_count();
                 Ok(None)
             },
             _ => {
@@ -216,7 +219,13 @@ impl TcpClient {
         let resp_replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
         let resp_listening = RespType::BulkStr { length: KW_LISTENING_PORT.len(), value: Some(KW_LISTENING_PORT.to_string()) };
         // let port: String = Config::get().port.to_string();
-        let port: String = AppStates::get().host_stats.as_ref().unwrap().port.unwrap().to_string();
+        let stats = AppStates::get().get_host_stats()
+            .ok_or_else(||
+                CustomError::InternalError(ERR_HOST_STATS_NOT_INITIATED.to_string()))?;
+        let port: String = stats.get_port()
+            .ok_or_else(||
+                CustomError::InternalError(ERR_MASTER_STATS_PORT_NOT_SET.to_string()))?
+            .to_string();
         let resp_port = RespType::BulkStr { length: port.len(), value: Some(port) };
         arr.add_item(resp_replconf);
         arr.add_item(resp_listening);

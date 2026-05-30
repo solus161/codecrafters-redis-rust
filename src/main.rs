@@ -20,10 +20,14 @@ mod client;
 mod resp;
 mod replication;
 mod tests;
+mod exceptions;
 
-use crate::app_state::{AppStates, ReplStats};
+use crate::app_state::{AppStates, Configs, ConfigsBuilder, ReplStats};
 use crate::client::{TcpClient, BUFFER_SIZE};
 use crate::epoll::{get_epoll_event_read, timer_create_event, timer_create_fd};
+use crate::exceptions::{
+    ERR_CREATING_EPOLL, ERR_HOST_STATS_NOT_INITIATED, 
+    ERR_MASTER_STATS_HOST_NOT_SET, ERR_MASTER_STATS_PORT_NOT_SET};
 use crate::resp::RespParser;
 use crate::cmd_handler::CmdHandler;
 use crate::replication::ClientTable;
@@ -31,21 +35,23 @@ use crate::replication::ClientTable;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parsing args for port
     let args: Vec<String> = env::args().collect();
-    AppStates::init(args);
+    AppStates::init(&args);
     let app_state = AppStates::get();
+
+    // Parsing args for configs
+    ConfigsBuilder::new().with_parse_config(&args).build();
 
     // Fd for master, replica #[cfg(test)]
     // let mut master: Option<TcpStream> = None;
 
     // Fd for listener 
-    let stats = app_state.host_stats.as_ref().unwrap();
-    let host = stats.host.as_deref().unwrap();
-    let port = stats.port.unwrap();
+    let host_stats = app_state.get_host_stats().expect(ERR_HOST_STATS_NOT_INITIATED);
+    let host = host_stats.get_host().unwrap();
+    let port = host_stats.get_port().unwrap();
     let listener = TcpListener::bind(format!("{}:{}", host, port)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let listener_fd = listener.as_raw_fd();
     let listener_fd_u64 = listener_fd as u64;
-    // drop(stats);
     
     // To store all clients or a master
     let mut clients: HashMap<u64, TcpClient> = HashMap::new();
@@ -56,14 +62,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cmd_handler = Rc::new(RefCell::new(CmdHandler::new(timer_fd)));
     
     // Get fd on epoll event
-    let epoll_fd = epoll::epoll_create().expect("Error creating epoll queue");
+    let epoll_fd = epoll::epoll_create().expect(ERR_CREATING_EPOLL);
 
-    // Add a master if in slave #[cfg(test)]
-    match app_state.master_stats.as_ref() {
+    // Add a master if in slave
+    match app_state.get_master_stats() {
         Some(repl_stats) => {
             println!("Run as replica");
-            let host = repl_stats.host.as_deref().unwrap();
-            let port = repl_stats.port.unwrap();
+            let host = repl_stats.get_host().expect(ERR_MASTER_STATS_HOST_NOT_SET);
+            let port = repl_stats.get_port().expect(ERR_MASTER_STATS_PORT_NOT_SET);
             // Connect to master
             let master = TcpStream::connect(format!("{}:{}", host, port))
                 .expect("Cannot connect to master");
@@ -139,9 +145,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 stream_key,
                                 epoll::get_epoll_event_read(stream_key as u64))?;
                             clients.insert(
-                                stream_key.try_into().unwrap(), 
+                                stream_key as u64, 
                                 TcpClient::new(
-                                    stream_key.try_into().unwrap(),
+                                    stream_key as u64,
                                     epoll_fd,
                                     stream, 
                                     Rc::clone(&cmd_handler)));
@@ -151,7 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     // Register epoll queue with its own key again
                     epoll::modify_interest(
-                        epoll_fd, listener_fd.try_into().unwrap(), 
+                        epoll_fd, listener_fd, 
                         epoll::get_epoll_event_read(listener_fd as u64))?;
                 },
                 
