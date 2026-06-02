@@ -1,12 +1,9 @@
-use std::cell::{Cell, OnceCell, RefCell};
 use std::fmt::Display;
 use std::fs;
-use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{OnceLock, RwLock};
-use std::rc::Rc;
+use std::sync::{OnceLock};
 
-use crate::exceptions::{ERR_RDB_CREATE, ERR_RDB_PARENT};
+use crate::exceptions::{ERR_RDB_CREATE};
 
 const RDB_FILE: &str = "redis-data";
 
@@ -46,7 +43,7 @@ impl Configs {
         }
     }
 
-    pub fn get_rbg_path(&self) -> Option<&String> {
+    pub fn get_rdb_path(&self) -> Option<&String> {
         self.rdb_path.as_ref()
     }
 
@@ -54,12 +51,16 @@ impl Configs {
         self.rdb_path = Some(rdb_path.into())
     }
 
-    pub fn get_rbg_filename(&self) -> Option<&String> {
+    pub fn get_rdb_filename(&self) -> Option<&String> {
         self.rdb_filename.as_ref()
     }
 
     pub fn set_rdb_filename(&mut self, rdb_filename: &str) {
         self.rdb_filename = Some(rdb_filename.into())
+    }
+
+    pub fn get_rdb_filepath(&self) -> (Option<&String>, Option<&String>) {
+        (self.get_rdb_path(), self.get_rdb_filename())
     }
 
     pub fn build(self) {
@@ -97,11 +98,6 @@ impl ConfigsBuilder {
                 panic!("{}: {}", &ERR_RDB_CREATE, e.to_string())
             }
         };
-        self
-    }
-
-    pub fn with_rdb_file(mut self, filename: &str) -> Self {
-        self.configs.set_rdb_filename(filename);
         self
     }
 
@@ -245,10 +241,7 @@ impl AppStates {
     }
 
     pub fn is_slave(&self) -> bool {
-        match self.master_stats {
-            Some(_) => true,
-            None => false
-        }
+        self.master_stats.is_some()
     }
 
     pub fn get_host_stats(&self) -> Option<&ReplStats> {

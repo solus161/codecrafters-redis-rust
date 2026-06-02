@@ -1,4 +1,4 @@
-use std::num::{ParseFloatError, ParseIntError};
+use std::{num::{ParseFloatError, ParseIntError}, string::FromUtf8Error};
 
 use crate::resp::RespType;
 
@@ -22,6 +22,8 @@ pub enum CustomError {
     UnsupportedCmd(String),
     UnprocessableError(String),
     InternalError(String),
+    FileReadingError,
+    RDBParsingError,
 }
 
 impl CustomError {
@@ -38,12 +40,14 @@ impl CustomError {
             Self::InternalError(s) => {
                 s
             },
+            Self::FileReadingError => "Error reading file".into(),
+            Self::RDBParsingError => "Error parsing RDB file".into(), 
         };
         RespType::Error(Some(msg)) 
     }
 
     pub fn into_error_bytes(self) -> Vec<u8> {
-        self.into_resp().to_bytes().unwrap_or_default()
+        self.into_resp().serialize()
     }
 
     pub fn err_path_not_exists(path: &str) -> Self {
@@ -70,5 +74,17 @@ impl From<ParseIntError> for CustomError {
 impl From<ParseFloatError> for CustomError {
     fn from(e: ParseFloatError) -> Self {
         Self::ParseError(e.to_string()) 
+    }
+}
+
+impl From<FromUtf8Error> for CustomError {
+    fn from(_: FromUtf8Error) -> Self {
+        Self::ParseError("Error parsing UTF8".to_string()) 
+    }
+}
+
+impl From<std::io::Error> for CustomError {
+    fn from(_: std::io::Error) -> Self {
+        Self::FileReadingError        
     }
 }

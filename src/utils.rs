@@ -1,4 +1,3 @@
-use libc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[macro_export]

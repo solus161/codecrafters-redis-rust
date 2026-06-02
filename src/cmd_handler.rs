@@ -1,29 +1,24 @@
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashSet, btree_map};
-use std::collections::{HashMap, VecDeque, hash_map::Entry };
-use std::{iter, u64};
-use std::ops::Bound::{Included, Excluded, Unbounded};
+use std::collections::{BTreeMap, HashSet};
+use std::collections::{HashMap, VecDeque};
+use std::u64;
+use std::ops::Bound::{Excluded, Unbounded};
 use std::rc::Rc;
-use std::str::from_utf8;
-use std::string::ParseError;
-use std::sync::atomic::{ AtomicU64, Ordering };
 
-use base64::write;
-use libc::{key_t, write};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 
 use crate::exceptions::{CustomError, ERR_HOST_STATS_NOT_INITIATED, ERR_MASTER_STATS_HOST_NOT_SET, ERR_MASTER_STATS_NOT_INITIATED, ERR_MASTER_STATS_PORT_NOT_SET};
-use crate::resp::{ RespType, RespValue };
+use crate::resp::{ RespType };
 use crate::epoll::{add_interest, get_epoll_event_read, remove_interest, timer_create_event};
-use crate::cmd_builder::{ Cmd, CmdArg, CmdError, KW_ACK, KW_FULLRESYNC, KW_GETACK, KW_PONG, KW_QUEUED, KW_REPLCONF, KW_REPLICATION };
+use crate::cmd_builder::{ Cmd, CmdArg, KW_ACK, KW_FULLRESYNC, KW_GETACK, KW_PONG, KW_QUEUED, KW_REPLCONF, KW_REPLICATION };
 use crate::utils::now;
 use crate::app_state::{AppStates, Configs};
 use crate::ClientTable;
 
 // Stored value types for CmdHandler
 #[derive(Debug)]
-enum StoreValue {
+pub enum StoreValue {
     Str(String),
     List(VecDeque<String>),
     Set(HashSet<String>),
@@ -51,16 +46,22 @@ impl StoreValue {
 }
 
 #[derive(Debug)]
-struct StoreItem { value: StoreValue, expired_at: Option<u64> }
+pub struct StoreItem { value: StoreValue, expired_at: Option<u64> }
+
+impl StoreItem {
+    pub fn new(value: StoreValue, expired_at: Option<u64>) -> Self {
+        Self { value, expired_at }
+    }
+}
 
 type Task = Box<dyn FnOnce(&mut CmdHandler)>;
 
 enum RequestEntry {
     List {
-        client_id: u64, key: String, deadline: u64,
+        key: Rc<str>, deadline: u64,
         backlog_task: Task, deadline_task: Task, },
     Stream {
-        client_id: u64, key_ts: Vec<(String, u64, u64)>, // key, ts, seq
+        key_ts: Vec<(Rc<str>, u64, u64)>, // key, ts, seq
         deadline: u64, backlog_task: Task, deadline_task: Task,
     },
     Wait {
@@ -92,7 +93,7 @@ struct RequestRegistry {
     
     // waiting queue for list
     // list name - queue of client (timestmap id)
-    backlog_list: HashMap<String, VecDeque<u64>>,
+    backlog_list: HashMap<Rc<str>, VecDeque<u64>>,
 
     // Set of client waiting for stream
     // This is not FIFO, but scan through all waiting clients
@@ -103,7 +104,7 @@ struct RequestRegistry {
     backlog_txn: HashMap<u64, VecDeque<(Cmd, Vec<u8>)>>,
     
     // Watch list, key - (client_id - dirty)
-    watchlist: HashMap<String, HashMap<u64, bool>>,
+    watchlist: HashMap<Rc<str>, HashMap<u64, bool>>,
 
     // To store waiting WAIT for client, client_id - timestamp
     backlog_wait: HashMap<u64, u64>,
@@ -215,7 +216,7 @@ impl RequestRegistry {
         Some(entry)
     }
 
-fn set_timer_fd(&self) {
+    fn set_timer_fd(&self) {
         match self.deadline.first_key_value() {
             Some((deadline, _)) => {
                 let now = now();
@@ -242,6 +243,10 @@ fn set_timer_fd(&self) {
         }
     }
 
+    pub fn is_transation(&self, client_id: &u64) -> bool {
+        self.backlog_txn.contains_key(client_id)
+    }
+
     pub fn get_nearest_deadline(&self) -> Option<(&u64, &u64)> {
         self.deadline.first_key_value() 
     }
@@ -251,7 +256,7 @@ fn set_timer_fd(&self) {
             .or_insert_with(VecDeque::new).push_back((cmd, buf));
     }
 
-    pub fn watch(&mut self, mut keys: Vec<String>, client_id: u64) {
+    pub fn watch(&mut self, mut keys: Vec<Rc<str>>, client_id: u64) {
         keys.drain(..).for_each(|k| {
             self.watchlist.entry(k).or_insert_with(HashMap::new)
                 .entry(client_id).or_insert(false);
@@ -259,7 +264,7 @@ fn set_timer_fd(&self) {
     }
 
     pub fn unwatch_all(&mut self, client_id: &u64) {
-        for (_, v) in self.watchlist.iter_mut() {
+        for v in self.watchlist.values_mut() {
             v.remove(client_id); 
         }
     }
@@ -269,7 +274,7 @@ fn set_timer_fd(&self) {
             Cmd::SET { key, .. } |
             Cmd::LPUSH { key, .. } | Cmd::RPUSH { key, .. } |
             Cmd::LPOP { key, .. } | Cmd::BLPOP { key, .. } => {
-                match self.watchlist.get_mut(key) {
+                match self.watchlist.get_mut(&Rc::from(key.as_str())) {
                     Some(w) => {
                         for (client_id, dirty) in w {
                             println!("Set dirty for key {} client_id {}", key, client_id);
@@ -317,9 +322,11 @@ impl CmdOutput{
 
 pub struct CmdHandler {
     // client_id, message
-    pub response_queue: Vec<(u64, Vec<u8>)>,
+    pub response_queue: Vec<(u64, Rc<Vec<u8>>)>,
     data: HashMap<String, StoreItem>,
     registry: RequestRegistry,
+    flag_backlog_list: bool,    // true to trigger matching
+    flag_backlog_stream: bool,  // true to trigger matching
  }
 
 impl CmdHandler {
@@ -328,7 +335,13 @@ impl CmdHandler {
             response_queue: Vec::new(),
             data: HashMap::new(),
             registry: RequestRegistry::new(timer_fd),
+            flag_backlog_list: false,
+            flag_backlog_stream: false,
         }
+    }
+
+    pub fn load_data(&mut self, data: HashMap<String, StoreItem>) {
+        self.data = data;
     }
 
     fn _execute_cmd(
@@ -350,6 +363,10 @@ impl CmdHandler {
                 .expect("Stats must be initiated at startup")
                 .add_bytes_count(buf.len() as i64);
         };
+
+        // Flags set when items added to list or stream
+        let is_flag_list = cmd.is_flag_list();
+        let is_flag_stream = cmd.is_flag_stream();
 
         println!("Client id {}, Cmd received {:?}, to be broadcast {}", &client_id, &cmd, &to_be_broadcast);
         let output: Result<Option<RespType>, CustomError> = match cmd {
@@ -383,19 +400,25 @@ impl CmdHandler {
             Cmd::RDB(_) => Ok(None), // client level
             Cmd::WAIT { count, timeout_ms } => self.cmd_wait(count, timeout_ms, client_id, epoll_fd),
             Cmd::CONFIG(arg) => Self::cmd_config(arg),
+            Cmd::KEYS(arg) => self.cmd_keys(arg),
             // _ => None
         };
 
         // println!("Cmd response {:?}", &output);
         match output {
             Ok(Some(resp)) => {
+                // Set flags
+                self.flag_backlog_list = is_flag_list;
+                self.flag_backlog_stream = is_flag_stream;
+
                 println!("Success cmd from client {}, broadcasting {}", &client_id, &to_be_broadcast);
+                let buf_rc = Rc::new(buf);
                 if to_be_broadcast {
                     // Broadcast by push to response_queue
                     match ClientTable::get().borrow().list_slave() {
                         Some(list) => {
                             for id in list {
-                                self.response_queue.push((*id, buf.clone()));
+                                self.response_queue.push((*id, buf_rc.clone()));
                             }
                         }
                         None => {} 
@@ -406,7 +429,7 @@ impl CmdHandler {
                 // Slave: count all bytes received from master AFTER dispatch
                 // so GETACK reads the pre-GETACK offset when building its response
                 if is_master {
-                    AppStates::get().host_add_bytes_count(buf.len() as i64);
+                    AppStates::get().host_add_bytes_count(buf_rc.len() as i64);
                 };
 
                 println!("Resp output {:?}", resp);
@@ -414,7 +437,7 @@ impl CmdHandler {
                 // unless it's REPLCONF GETACK
                 if !is_master | always_response {
                     if serialized {
-                        Ok(CmdOutput::Bytes(resp.to_bytes().unwrap()))
+                        Ok(CmdOutput::Bytes(resp.serialize()))
                     } else {
                         Ok(CmdOutput::Resp(resp))
                     }
@@ -439,37 +462,37 @@ impl CmdHandler {
 
     pub fn handle(
         &mut self, cmd: Result<Cmd, CustomError>, buf: Vec<u8>, client_id: u64, epoll_fd: i32)
-        -> Result<Option<Vec<u8>>, Vec<u8>> {
+        -> Result<Vec<u8>, Vec<u8>> {
         match cmd {
             Ok(c) => {
-                if !self.registry.backlog_txn.contains_key(&client_id) {
+                if !self.registry.is_transation(&client_id) {
                     self._execute_cmd(c, buf, client_id, Some(epoll_fd), true)
-                        .map(|out| {out.extract_bytes()})
+                        .map(|out| out.extract_bytes().unwrap_or_default())
                         .map_err(|err| err.extract_bytes().unwrap_or_default())
                 } else {
                     match c {
                         Cmd::EXEC => {
                             // Execute transaction
                             match self.cmd_exec(client_id) {
-                                Ok(Some(resp)) => Ok(resp.to_bytes()),
-                                _ => Ok(None),
+                                Ok(Some(resp)) => Ok(resp.serialize()),
+                                _ => Ok(Vec::new()),
                             }
                         },
                         Cmd::DISCARD => {
                             match self.cmd_discard(client_id) {
-                                Ok(Some(resp)) => Ok(resp.to_bytes()),
-                                _ => Ok(None),
+                                Ok(Some(resp)) => Ok(resp.serialize()),
+                                _ => Ok(Vec::new()),
                             }
                         },
                         Cmd::WATCH(_) => {
                             Ok(RespType::Error(Some(
                                 "ERR WATCH inside MULTI is not allowed".to_string()))
-                                .to_bytes())
+                                .serialize())
                         }
                         _ => {
                             // Building a transaction
                             self.registry.add_to_txn(client_id, c, buf);
-                            Ok(RespType::SimpleStr(Some(KW_QUEUED.to_string())).to_bytes())
+                            Ok(RespType::SimpleStr(Some(KW_QUEUED.to_string())).serialize())
                         }
                     }
                 }
@@ -503,8 +526,8 @@ impl CmdHandler {
         }
     }
 
-    fn get_null_array() -> Option<Vec<u8>> {
-        RespType::Array { length: 0, value: None }.to_bytes()
+    fn get_null_array() -> Vec<u8> {
+        RespType::Array { length: 0, value: None }.serialize()
     }
 
     pub fn callback_deadline_expire(&mut self) {
@@ -533,12 +556,15 @@ impl CmdHandler {
     
     pub fn serve_backlog_list(&mut self) {
         // Execute once at the end of main each event loop,
+        // triggered when new item add to list
         // matching BLPOP queue with available item,
         // other LPOP requests are served at request time at client loop
-        let mut timestamps: Vec<u64> = Vec::new();
+        if !self.flag_backlog_list { return };
 
+        println!("Serve backlog list");
+        let mut timestamps: Vec<u64> = Vec::new();
         for (k, v) in self.registry.backlog_list.iter() {
-            if let Some(item) = self.data.get(k) {
+            if let Some(item) = self.data.get(k.as_ref()) {
                 match &item.value {
                     StoreValue::List(list) => {
                         let max_pop = v.len().min(list.len());
@@ -565,12 +591,18 @@ impl CmdHandler {
         // Execute backlog task
         for task in tasks {
             task(self);
-        }
+        };
+
+        self.flag_backlog_list = false;
     }
 
     pub fn serve_backlog_stream(&mut self) {
         // Consecutively scanned for fullfilled stream
         // in backlog_stream
+        // triggered when new entry add to stream
+        if !self.flag_backlog_stream { return };
+
+        println!("Serve backlog stream");
         let mut timestamps: Vec<u64> = Vec::new();
         for t in self.registry.backlog_stream.iter() {
             println!("Timestamp {} in backlog_stream", &t);
@@ -613,7 +645,9 @@ impl CmdHandler {
         // Execute backlog task
         for task in tasks {
             task(self);
-        }
+        };
+
+        self.flag_backlog_stream = false;
     }
 
     fn cmd_ping() -> Result<Option<RespType>, CustomError> {
@@ -622,10 +656,6 @@ impl CmdHandler {
 
     fn cmd_echo(s: String) -> Result<Option<RespType>, CustomError> {
         Ok(Some(RespType::BulkStr{ length: s.len(), value: Some(s) }))
-    }
-
-    fn cmd_err(s: String) -> Result<Option<RespType>, CustomError> {
-        Ok(Some(RespType::SimpleStr(Some(s))))
     }
 
     fn cmd_set(&mut self, key: String, value: String, opt: Option<CmdArg>) ->
@@ -659,7 +689,8 @@ impl CmdHandler {
 
     fn cmd_rpush(&mut self, key: String, value: Vec<String>) ->
         Result<Option<RespType>, CustomError> {
-        let item = self.data.entry(key.clone()).or_insert(
+        let msg_unsupported = format!("Unsupported command {}", &key);
+        let item = self.data.entry(key).or_insert(
             StoreItem {
                 value: StoreValue::List(VecDeque::new()),
                 expired_at: None });
@@ -669,7 +700,7 @@ impl CmdHandler {
                 list.extend(value);
                 Ok(Some(RespType::Integer(Some(list.len() as i64))))
             },
-            _ =>  Err(CustomError::UnsupportedCmd(format!("Unsupported command {}", &key))),
+            _ =>  Err(CustomError::UnsupportedCmd(msg_unsupported)),
         }
     }
 
@@ -719,7 +750,9 @@ impl CmdHandler {
                                 value: Some(VecDeque::<RespType>::new())};
                             
                             for i in list.iter().skip(min_index).take(output_len){
-                                output.add_item(RespType::BulkStr { length: i.len(), value: Some(i.clone()) }); 
+                                output.add_item(RespType::BulkStr {
+                                    length: i.len(),
+                                    value: Some(i.clone()) }); 
                             };
                             Ok(Some(output))
                         }
@@ -734,8 +767,9 @@ impl CmdHandler {
     }
     
     fn cmd_lpush(&mut self, key: String, value: VecDeque<String>) -> Result<Option<RespType>, CustomError> {
+        let msg = format!("Unsupported command {}", &key);
         // Create list if not exists
-        let item = self.data.entry(key.clone()).or_insert(
+        let item = self.data.entry(key).or_insert(
             StoreItem { 
                 value: StoreValue::List(VecDeque::new()),
                 expired_at: None } );
@@ -747,7 +781,7 @@ impl CmdHandler {
                 };
                 Ok(Some(RespType::Integer(Some(list.len() as i64))))
             },
-            _ => Err(CustomError::UnsupportedCmd(format!("Unsupported command {}", &key)))
+            _ => Err(CustomError::UnsupportedCmd(msg))
         }
         
     }
@@ -816,6 +850,7 @@ impl CmdHandler {
     {
         let (timestamp, deadline) = Self::get_deadline(timeout_ms);
         let key_task = key.clone();
+        let key_rc: Rc<str> = Rc::from(key.as_str());
         println!("BLPOP at {}, key {}, timeout ms {:?}", deadline, &key, timeout_ms);
 
         // Task to run when item available to pop
@@ -840,7 +875,7 @@ impl CmdHandler {
                 let resp_item = RespType::BulkStr { length: item.len(), value: Some(item) };
                 output.add_item(resp_key);
                 output.add_item(resp_item);
-                handler.response_queue.push((client_id, output.to_bytes().unwrap()));
+                handler.response_queue.push((client_id, output.serialize().into()));
                 println!("Push to response queue: , {:?}", &handler.response_queue.last().unwrap());
 
                 // Disable deadline
@@ -849,8 +884,8 @@ impl CmdHandler {
         });
 
         let deadline_task = Box::new(move |handler: &mut CmdHandler| {
-            let msg = Self::get_null_array().unwrap();
-            handler.response_queue.push((client_id, msg));
+            let msg = Self::get_null_array();
+            handler.response_queue.push((client_id, msg.into()));
             println!(
                 "Push to response queue: {:?}", 
                 &handler.response_queue.last().unwrap());
@@ -879,7 +914,7 @@ impl CmdHandler {
                             // Wait
                             self.registry.insert(
                                 timestamp, deadline, 
-                                RequestEntry::List { client_id, key, deadline, backlog_task, deadline_task });
+                                RequestEntry::List { key: key_rc, deadline, backlog_task, deadline_task });
                             Ok(None)
                         }
                     },
@@ -891,7 +926,7 @@ impl CmdHandler {
                 // wait in queue for client
                 self.registry.insert(
                     timestamp, deadline,
-                    RequestEntry::List { client_id, key, deadline, backlog_task, deadline_task });
+                    RequestEntry::List { key: key_rc, deadline, backlog_task, deadline_task });
                 Ok(None)
             }
         }
@@ -914,11 +949,7 @@ impl CmdHandler {
         // For this stage, id is explicitely declare
         // TODO: handle case id = * and id = 123-*
         value: Vec<String>) -> Result<Option<RespType>, CustomError> {
-        // Add key if not exists
-        self.data.entry(key.clone()).or_insert(StoreItem {
-            value: StoreValue::Stream(BTreeMap::new()),
-            expired_at: None });
-
+        
         // Error messages
         let msg_invalid_last = 
            "ERR The ID specified in XADD is equal \
@@ -930,67 +961,78 @@ impl CmdHandler {
         let msg_invalid_format = 
             "ERR Invalid stream id format";
 
-        // Check valid type
-        let id_valid: (u64, u64) = match &self.data.get(&key).unwrap().value {
-            StoreValue::Stream(b) => {
-                match id {
-                    (Some(t), Some(i)) => {
-                        if t == 0 && i == 0 {
-                            return Err(CustomError::InvalidArgument(msg_invalid_00.to_string()))
-                        };
+        // Check type first
+        let msg_unsupported = format!("Unsupported command {}", &key);
+        // match self.data.get(&key).unwrap().value {
+        //     StoreValue::Stream(_) => { },
+        //     _ => return Err(CustomError::UnsupportedCmd(msg_unsupported)),
+        // }
 
-                        match b.last_key_value() {
-                            Some((k, _)) => {
-                                let (t_last, i_last) = *k;
-                                if t > t_last || (t == t_last && i > i_last) {
-                                    (t, i)
-                                } else {
-                                    return Err(CustomError::InvalidArgument(msg_invalid_last.to_string()))
-                                } 
-                            },
-                            None => (t, i),
-                        }
-                    },
-                    (Some(t), None) => {
-                        match b.last_key_value() {
-                            Some((k, _)) => {
-                                let (t_last, i_last) = *k;
-                                if t == t_last {
-                                    (t, i_last + 1)
-                                }
-                                else if t > t_last {
-                                    (t, 0)
-                                } else {
-                                    return Err(CustomError::InvalidArgument(msg_invalid_format.to_string()))
-                                }
-                            },
-                            None => {
-                                if t == 0 {(t, 1)} else {(t, 0)}
-                            }
-                        } 
-                    },
-                    (None, None) => {
-                        (now(), 0)
-                    },
-                    _ => {
-                        return Err(CustomError::InvalidArgument(msg_invalid_format.to_string()))
-                    }
-                }
-            },
-            _ => {
-                return Err(CustomError::UnsupportedCmd(format!("Unsupported command {}", &key)));
-            }
+        // Add key if not exists
+        let item = self.data.entry(key).or_insert(StoreItem {
+            value: StoreValue::Stream(BTreeMap::new()),
+            expired_at: None });
 
+        let StoreValue::Stream(b) = &mut item.value else {
+            return Err(CustomError::UnsupportedCmd(msg_unsupported))
         };
 
-        match &mut self.data.get_mut(&key).unwrap().value {
-            StoreValue::Stream(btree) => {
-                btree.insert((id_valid.0, id_valid.1), value);
-                let msg = format!("{}-{}", id_valid.0, id_valid.1);
-                Ok(Some(RespType::BulkStr { length: msg.len(), value: Some(msg) }))
+        let id_valid: (u64, u64) = match id {
+            (Some(t), Some(i)) => {
+                if t == 0 && i == 0 {
+                    return Err(CustomError::InvalidArgument(msg_invalid_00.to_string()))
+                };
+
+                match b.last_key_value() {
+                    Some((k, _)) => {
+                        let (t_last, i_last) = *k;
+                        if t > t_last || (t == t_last && i > i_last) {
+                            (t, i)
+                        } else {
+                            return Err(CustomError::InvalidArgument(msg_invalid_last.to_string()))
+                        } 
+                    },
+                    None => (t, i),
+                }
             },
-            _ => Ok(None)
-        }
+            (Some(t), None) => {
+                match b.last_key_value() {
+                    Some((k, _)) => {
+                        let (t_last, i_last) = *k;
+                        if t == t_last {
+                            (t, i_last + 1)
+                        }
+                        else if t > t_last {
+                            (t, 0)
+                        } else {
+                            return Err(CustomError::InvalidArgument(msg_invalid_format.to_string()))
+                        }
+                    },
+                    None => {
+                        if t == 0 {(t, 1)} else {(t, 0)}
+                    }
+                } 
+            },
+            (None, None) => {
+                (now(), 0)
+            },
+            _ => {
+                return Err(CustomError::InvalidArgument(msg_invalid_format.to_string()))
+            }
+        };
+        
+        b.insert((id_valid.0, id_valid.1), value);
+        let msg = format!("{}-{}", id_valid.0, id_valid.1);
+        Ok(Some(RespType::BulkStr { length: msg.len(), value: Some(msg) }))
+
+        // match &mut self.data.get_mut(&key).unwrap().value {
+        //     StoreValue::Stream(btree) => {
+        //         btree.insert((id_valid.0, id_valid.1), value);
+        //         let msg = format!("{}-{}", id_valid.0, id_valid.1);
+        //         Ok(Some(RespType::BulkStr { length: msg.len(), value: Some(msg) }))
+        //     },
+        //     _ => Ok(None)
+        // }
     }
     
     fn _extract_stream_id(
@@ -1188,15 +1230,16 @@ impl CmdHandler {
         let mut stream_vec: Vec<(String, RespType)> = Vec::new();
 
         // key, start timestamp, seq
-        let mut key_ts: Vec<(String, u64, u64)> = Vec::new();
+        let mut key_ts: Vec<(Rc<str>, u64, u64)> = Vec::new();
         for (key, start_ts, seq) in &stream {
+            let key_rc = Rc::from(key.as_str());
             match self._extract_stream_entries(&key, count.unwrap_or(u64::MAX), *start_ts, *seq) {
                 Some(b) => { 
                     stream_vec.push((key.clone(), b)); 
                 },
                 None => {/* Skip this, no return */}
             };
-            key_ts.push((key.clone(), *start_ts, *seq));
+            key_ts.push((key_rc, *start_ts, *seq));
         };
         
         // If non blocking, return nil if no entities retrieved
@@ -1207,12 +1250,6 @@ impl CmdHandler {
                     // BLOCK 0 means wait indefinitely — pass None so no deadline timer is armed
                     let timeout_arg = if t_ms == 0 { None } else { Some(t_ms as u64) };
                     let (timestamp, deadline) = Self::get_deadline(timeout_arg);
-                    
-                    // This will run if conditions meet
-                    let mut keys: Vec<String> = Vec::new();
-                    for (key, _, _) in &stream {
-                        keys.push(key.clone());
-                    }
 
                     let backlog_task = Box::new(move |handler: &mut CmdHandler| {
                         let mut stream_vec: Vec<(String, RespType)> = Vec::new();
@@ -1233,7 +1270,7 @@ impl CmdHandler {
                         if stream_vec.is_empty() {
                            handler.response_queue.push((
                                    client_id,
-                                   RespType::Array { length: 0, value: None }.to_bytes().unwrap()));
+                                   RespType::Array { length: 0, value: None }.serialize().into()));
                         } else {
                             let mut arr_stream = RespType::Array {
                                 length: stream_vec.len(), value: None };
@@ -1243,14 +1280,14 @@ impl CmdHandler {
                                 pair.add_item(entries);
                                 arr_stream.add_item(pair);
                             };
-                            handler.response_queue.push((client_id, arr_stream.to_bytes().unwrap()));
+                            handler.response_queue.push((client_id, arr_stream.serialize().into()));
                             handler.registry.remove(&timestamp);
                         }
                     });
 
                     let deadline_task = Box::new(move |handler: &mut CmdHandler| {
-                        let msg = Self::get_null_array().unwrap();
-                        handler.response_queue.push((client_id, msg));
+                        let msg = Self::get_null_array();
+                        handler.response_queue.push((client_id, msg.into()));
                         println!(
                             "Push to response queue: {:?}", 
                             &handler.response_queue.last().unwrap());
@@ -1260,7 +1297,7 @@ impl CmdHandler {
                     println!("Insert XREAD to backlog_stream ts {}", &timestamp);
                     self.registry.insert(
                         timestamp, deadline,
-                        RequestEntry::Stream { client_id, key_ts, deadline, backlog_task, deadline_task }
+                        RequestEntry::Stream { key_ts, deadline, backlog_task, deadline_task }
                     );
                     println!("Backlog stream after insert {:?}", self.registry.backlog_stream.iter());
                 },   
@@ -1290,7 +1327,7 @@ impl CmdHandler {
     }
 
     fn cmd_incr(&mut self, key: String) -> Result<Option<RespType>, CustomError> { 
-        let item = self.data.entry(key.clone()).or_insert(
+        let item = self.data.entry(key).or_insert(
             StoreItem {
                 value: StoreValue::Str("0".to_string()),
                 expired_at: None,
@@ -1321,7 +1358,7 @@ impl CmdHandler {
     }
     
     fn cmd_multi(&mut self, client_id: u64) -> Result<Option<RespType>, CustomError> {
-        let no_txn: bool = !self.registry.backlog_txn.contains_key(&client_id);
+        let no_txn: bool = !self.registry.is_transation(&client_id);
 
         if no_txn {
             self.registry.backlog_txn.insert(client_id, VecDeque::new());
@@ -1359,11 +1396,13 @@ impl CmdHandler {
             
             // Execute
             vec_cmd.drain(..).for_each(|(cmd, buf)| {
-                    // Cmd will certainly be executed, could unwatch now
-                // self.registry.unwatch(&client_id, &cmd);
-
                 match self._execute_cmd(cmd, buf, client_id, None, false) {
-                    Ok(cmd_output) | Err(cmd_output) => vec_resp.push(cmd_output.extract_resp().unwrap()), // also need propagation
+                    Ok(cmd_output) | Err(cmd_output) => {
+                        match cmd_output {
+                            CmdOutput::Resp(r) => vec_resp.push(r),
+                            _ => {}
+                        } 
+                    }
                 }
             });
             
@@ -1401,7 +1440,8 @@ impl CmdHandler {
     }
 
     fn cmd_watch(&mut self, keys: Vec<String>, client_id: u64) -> Result<Option<RespType>, CustomError> {
-        self.registry.watch(keys, client_id);
+        let keys_rc: Vec<Rc<str>> = keys.iter().map(|key| Rc::from(key.as_str())).collect();
+        self.registry.watch(keys_rc, client_id);
         Ok(Self::response_ok())
     }
 
@@ -1410,8 +1450,9 @@ impl CmdHandler {
         Ok(Self::response_ok())
     }
 
-    fn cmd_info(key: String) -> Result<Option<RespType>, CustomError> {
-        if key.to_uppercase() == KW_REPLICATION {
+    fn cmd_info(mut key: String) -> Result<Option<RespType>, CustomError> {
+        let _ = key.make_ascii_uppercase();
+        if key == KW_REPLICATION {
             // The slave status initiated with --relicaof
             if AppStates::get().is_slave() {
                 // If the sending client master
@@ -1455,13 +1496,15 @@ impl CmdHandler {
             let id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"; // TODO: for testing only
             let offset = stats.get_offset().max(0);
             let msg = format!("{} {} {}", &KW_FULLRESYNC, &id, &offset);
-            self.response_queue.push((client_id, RespType::SimpleStr(Some(msg)).to_bytes().unwrap()));
+            self.response_queue.push((client_id, RespType::SimpleStr(Some(msg)).serialize().into()));
 
             // Example
             let empty_rdb_b64 = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
             let empty_rdb = STANDARD.decode(empty_rdb_b64).unwrap();
-            self.response_queue.push((client_id, RespType::RDB(Some(empty_rdb))
-                .to_bytes().unwrap()));
+            self.response_queue.push((
+                client_id,
+                RespType::RDB(Some(empty_rdb)).serialize().into()
+            ));
             
             // Set client as slave
             println!("Set client {} as slave", &client_id);
@@ -1538,7 +1581,7 @@ impl CmdHandler {
                                 if actual_count.get() >= *required_count {
                                     // Response to client
                                     let resp_count = RespType::Integer(Some(actual_count.get() as i64));
-                                    self.response_queue.push((*id, resp_count.to_bytes().unwrap()));
+                                    self.response_queue.push((*id, resp_count.serialize().into()));
 
                                     client_done.push(*id);
                                 }
@@ -1627,7 +1670,7 @@ impl CmdHandler {
             Some(h) => {
                 for k in h.iter() {
                     println!("Master sends GETACK to client {}", k);
-                    self.response_queue.push((*k, arr.to_bytes().unwrap()));
+                    self.response_queue.push((*k, arr.serialize().into()));
                     slave_ids.push(*k);
                 }
             },
@@ -1640,7 +1683,7 @@ impl CmdHandler {
         let deadline_task = Box::new(move |handler: &mut CmdHandler| {
             // Send response to client
             let resp_count = RespType::Integer(Some(count_ref.get() as i64));
-            handler.response_queue.push((client_id, resp_count.to_bytes().unwrap()));
+            handler.response_queue.push((client_id, resp_count.serialize().into()));
 
             // Remove client from registry
             handler.registry.remove(&timestamp);
@@ -1673,7 +1716,7 @@ impl CmdHandler {
         match arg {
             CmdArg::GET(s) => {
                 if s == "dir" {
-                    let path = config.get_rbg_path().unwrap_or(&"".to_string()).to_string();
+                    let path = config.get_rdb_path().unwrap_or(&"".to_string()).to_string();
                     let mut resp_arr = RespType::Array { length: 2, value: None };
                     let resp_arg = RespType::BulkStr { length: 3, value: Some("dir".to_string()) };
                     let resp_path = RespType::BulkStr { length: path.len(), value: Some(path.to_string()) };
@@ -1681,7 +1724,7 @@ impl CmdHandler {
                     resp_arr.add_item(resp_path);
                     Ok(Some(resp_arr))
                 } else if s == "dbfilename" {
-                    let filename = config.get_rbg_filename().unwrap_or(&"".to_string()).to_string();
+                    let filename = config.get_rdb_filename().unwrap_or(&"".to_string()).to_string();
                     let mut resp_arr = RespType::Array { length: 2, value: None };
                     let resp_arg = RespType::BulkStr { length: 3, value: Some("dir".to_string()) };
                     let resp_filename = RespType::BulkStr {
@@ -1695,6 +1738,19 @@ impl CmdHandler {
                 }
             },
             _ => Err(CustomError::UnsupportedCmdStructure("Unsupported arg".to_string()))
+        }
+    }
+
+    fn cmd_keys(&self, arg: String) -> Result<Option<RespType>, CustomError> {
+        if arg == "*" {
+            let mut resp_arr = RespType::Array { length: self.data.len(), value: None };
+            for k in self.data.keys() {
+                let resp_bulk = RespType::BulkStr { length: k.len(), value: Some(k.clone()) };
+                resp_arr.add_item(resp_bulk);
+            };
+            Ok(Some(resp_arr))
+        } else {
+            Err(CustomError::InvalidArgument("Invalid arg for KEYS".to_string()))
         }
     }
 }

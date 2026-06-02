@@ -1,10 +1,8 @@
 #![allow(dead_code)]
 
-use std::io;
+use std::io::{ self, Write };
 use std::collections::VecDeque;
 use std::str;
-use std::thread;
-use std::time::Duration;
 
 use crate::exceptions::CustomError;
 
@@ -36,8 +34,9 @@ impl ReadBytesOutput {
 //---------Parser
 #[derive(Debug)]
 pub struct RespParser {
-    pub buf: VecDeque<u8>,
-    pub tmp: Vec<u8>,
+    pub buf: Vec<u8>,
+    pub buf_cur: usize,
+    pub tmp_start: usize,
     pub stack: Vec<RespType>,           // Hold incompletly parsed type
     pub completed: VecDeque<RespType>,  // Hold completed type
     pub status: ParseStatus,
@@ -46,28 +45,32 @@ pub struct RespParser {
 impl RespParser {
     pub fn new() -> Self {
         Self{ 
-            buf: VecDeque::new(),
-            tmp: Vec::new(),
+            buf: Vec::new(),
+            buf_cur: 0,
+            tmp_start: 0,
             stack: Vec::new(),
             completed: VecDeque::new(),
             status: ParseStatus::Type }
     }
 
     pub fn feed_buf(&mut self, data: &[u8], n: usize) {
-        self.buf.append(&mut VecDeque::from(data[..n].to_vec()));
+        self.buf.extend(&data[..n]);
         // println!("Parser read to buf: {:?}", &data[..n]);
     }
 
     pub fn parse(&mut self, rdb: bool) -> Result<(), Box<dyn std::error::Error>> {
         loop {
+            // sleep(Duration::new(1, 0));
+            // println!("Buf {:?}", str::from_utf8(&self.buf).unwrap());
+            // println!("buf_cur {}, tmp_start {}", &self.buf_cur, &self.tmp_start);
             // Check if top stack is is_completed
             self.pop_completed();
             if !self.completed.is_empty() {
                 return Ok(())
             }
 
-            if self.buf.is_empty() {
-                // println!("Parser buf emtpy");
+            if self.buf.is_empty() || self.buf_cur >= self.buf.len() {
+                // println!("Parser buf empty");
                 return Ok(());
             };
             
@@ -114,6 +117,7 @@ impl RespParser {
                         Ok(Some(s)) => {
                             // This String s will be consumed by top stack resp type
                             // which has length attr
+                            self.drain_till_buf();
                             if let Some(top) = self.stack.last_mut() {
                                 // println!("{:?}", &s);
                                 let length: usize = s.str().unwrap().parse()?;
@@ -150,6 +154,7 @@ impl RespParser {
                     // println!("Parsing Line");
                     match self.next_till_new_line() {
                         Ok(Some(s)) => {
+                            self.drain_till_buf();
                             if let Some(top) = self.stack.last_mut() {
                                 // TODO: handle converting to i64
                                 top.set_value(s)?;
@@ -165,16 +170,20 @@ impl RespParser {
                     }
                 },
                 ParseStatus::Bulk(n) => {
+                    // println!("Parsing Bulk");
                     match self.read_bytes(n, false) {
                         Ok(o) => {
                             match o {
                                 Some(s) => {
+                                    // println!("Parsing Bulk s");
+                                    self.drain_till_buf();
                                     if let Some(top) = self.stack.last_mut() {
                                         top.set_value(s)?;
                                         self.status = ParseStatus::Type;
                                     };
                                 },
                                 None => {
+                                    // println!("Parsing Bulk None");
                                     self.status = ParseStatus::Bulk(n)
                                 },
                             }
@@ -183,10 +192,12 @@ impl RespParser {
                     }
                 },
                 ParseStatus::RDB(n) => {
+                    // println!("Parsing RDB");
                     match self.read_bytes(n, true) {
                         Ok(o) => {
                             match o {
                                 Some(s) => {
+                                    self.drain_till_buf();
                                     if let Some(top) = self.stack.last_mut() {
                                         top.set_value(s)?;
                                         self.status = ParseStatus::Type;
@@ -248,14 +259,15 @@ impl RespParser {
 
     fn next_till_type(&mut self, rdb: bool) -> Option<RespType> {
         // Consume buf till getting a type
-        while !self.buf.is_empty() {
-            match RespType::match_prefix(self.buf[0], rdb) {
+        while !self.buf.is_empty() && self.buf_cur < self.buf.len() {
+            match RespType::match_prefix(self.buf[self.buf_cur], rdb) {
                 Some(resp_type) => {
-                    self.buf.pop_front();
+                    self.buf_cur += 1;
+                    self.tmp_start = self.buf_cur;
                     return Some(resp_type);
                 },
                 None => {
-                    self.buf.pop_front();
+                    self.buf_cur += 1;
                 },
             }
         };
@@ -266,25 +278,37 @@ impl RespParser {
         Result<Option<ReadBytesOutput>, Box<dyn std::error::Error>> {
         // Consume buf till getting new line \r\n
         // println!("Head 5 buff: {:?}", self.buf.iter().take(5).collect::<Vec<_>>());
-        while self.buf.len() >= 2 {
-            if self.buf[0] == b'\r' && self.buf[1] == b'\n' {
-                let output: Vec<u8> = self.tmp.drain(..).collect();
-                // println!("Line drained {:?}", &output);
-                match str::from_utf8(&output) {
+        while self.buf.len() - self.buf_cur >= 2 {
+            if self.buf[self.buf_cur] == b'\r' && self.buf[self.buf_cur + 1] == b'\n' {
+                match str::from_utf8(&self.buf[self.tmp_start..self.buf_cur]) {
                     Ok(s) => {
-                        //  Pop delimiter
-                        self.buf.pop_front();
-                        self.buf.pop_front();
+                        self.buf_cur += 2;
+                        self.tmp_start = self.buf_cur;
                         return Ok(Some(ReadBytesOutput::String(s.to_string())));
                     },
-                    Err(e) => { 
-                        // TODO: handle utf8 converting error
+                    Err(e) => {
+                        // TODO: convert this to CustomError
                         return Err(Box::new(e))
-                    },
+                    }
                 }
+                // let output: Vec<u8> = self.tmp.drain(..).collect();
+                // println!("Line drained {:?}", &output);
+                // match str::from_utf8(&output) {
+                //     Ok(s) => {
+                //         //  Pop delimiter
+                //         self.buf.pop_front();
+                //         self.buf.pop_front();
+                //         return Ok(Some(ReadBytesOutput::String(s.to_string())));
+                //     },
+                //     Err(e) => { 
+                //         // TODO: handle utf8 converting error
+                //         return Err(Box::new(e))
+                //     },
+                // }
             } else {
                 // Pop from buf, push to tmp
-                self.tmp.push(self.buf.pop_front().unwrap());
+                // self.tmp.push(self.buf.pop_front().unwrap());
+                self.buf_cur += 1
             };
         };
         Ok(None)
@@ -295,33 +319,48 @@ impl RespParser {
         // Logic change: just read to n bytes
         // - if rdb, end
         // - if not, looking for \r\n
-        let tmp_len = self.tmp.len();
+        let tmp_len = self.buf_cur - self.tmp_start;
         let buf_len = self.buf.len();
         let mut ending_len = 2;
 
         if rdb { ending_len = 0 }; 
         let next_len = (n + ending_len).saturating_sub(tmp_len).min(buf_len);
+
+        // println!("buf_cur before next_len {}", self.buf_cur);
+        // println!("next_len {}", next_len);
         
         if next_len > 0 {
-            self.tmp.append(&mut self.buf.drain(..next_len).collect::<Vec<u8>>());
+            self.buf_cur += next_len;
+            // self.tmp.append(&mut self.buf.drain(..next_len).collect::<Vec<u8>>());
             // return Ok(None);
         };
+
+        // println!("read_bytes buf_cur {}, tmp_start {}, n {}, ending_len {}", self.buf_cur, self.tmp_start, n, ending_len);
         
-        if self.tmp.len() == n + ending_len {
+        if self.buf_cur <= self.buf.len() && self.buf_cur - self.tmp_start == n + ending_len {
             // tmp must end with \r\n
-            if !rdb && self.tmp[n] == b'\r' && self.tmp[n+1] == b'\n' {
-                match str::from_utf8(&self.tmp.drain(..n).collect::<Vec<u8>>()) {
+            if !rdb && self.buf[self.tmp_start + n] == b'\r' && self.buf[self.tmp_start + n + 1] == b'\n' {
+                match str::from_utf8(&self.buf[self.tmp_start..self.buf_cur - 2]) {
                     Ok(s) => {
-                        self.tmp.drain(..ending_len);
-                        return Ok(Some(ReadBytesOutput::String(s.to_string()))); 
+                        return Ok(Some(ReadBytesOutput::String(s.to_string())));
                     },
                     Err(e) => {
-                        // Error converting to utf8
-                        return Err(Box::new(e));
+                        // TODO: convert to CustomError
+                        Err(Box::new(e))
                     }
-                };
+                }
+                // match str::from_utf8(&self.tmp.drain(..n).collect::<Vec<u8>>()) {
+                //     Ok(s) => {
+                //         self.tmp.drain(..ending_len);
+                //         return Ok(Some(ReadBytesOutput::String(s.to_string()))); 
+                //     },
+                //     Err(e) => {
+                //         // Error converting to utf8
+                //         return Err(Box::new(e));
+                //     }
+                // };
             } else if rdb {
-                Ok(Some(ReadBytesOutput::Bytes(self.tmp.drain(..n).collect::<Vec<u8>>()))) 
+                Ok(Some(ReadBytesOutput::Bytes(self.buf[self.tmp_start..self.buf_cur].into()))) 
             } else {
                 // Error ending \r\n not found
                 return Err(Box::new(
@@ -337,7 +376,19 @@ impl RespParser {
            return Ok(None);
         }
     }
+
+    fn drain_till_buf(&mut self) {
+        // Drain all bytes before buf_cur
+        self.buf.drain(..self.buf_cur);
+
+        // Reset buf_cur to 0
+        self.buf_cur = 0;
+
+        // Reset tmp_start to buf_cur
+        self.tmp_start = 0;
+    }
 }
+
 
 
 //------ RespType
@@ -443,52 +494,30 @@ impl RespType {
             Self::Array { length, .. } | Self::BulkStr { length, .. } => {
                 *length = value
             },
-            _ => {
-                // Do nothing
-            }
+            _ => { /* Do nothing */}
         }
     }
 
     pub fn is_completed(&self) -> bool {
         // To check whether a type is completely parsed_value
         match self {
-            Self::SimpleStr(o) | Self::Error(o) => {
-                match o {
-                    Some(_) => return true,
-                    None => return false,
-                }
-            },
-            Self::Integer(o) => {
-                match o {
-                    Some(_) => return true,
-                    None => return false,
-                }
-            },
+            Self::SimpleStr(o) | Self::Error(o) => o.is_some(),
+            Self::Integer(o) => o.is_some(),
             Self::Array{ length, value } => {
                 match value {
                     Some(v) => {
                         if v.len() == *length {
-                            return true;
+                            true
                         } else {
-                            return false
+                            false
                         }
-                    }
-                    None => return false
+                    },
+                    None => false
                 }
             },
             Self::BulkStr { value, .. } | Self::BulkError { value, .. } |
-            Self::VerbatimStr { value, .. } => {
-                match value {
-                    Some(_) => return true,
-                    None => return false
-                }
-            },
-            Self::RDB(o) => {
-                match o {
-                    Some(_) => return true,
-                    None => return false,
-                }
-            },
+            Self::VerbatimStr { value, .. } => value.is_some(),
+            Self::RDB(o) => o.is_some(),
             _ => return false,
         }
     }
@@ -498,9 +527,7 @@ impl RespType {
             Self::Array { value, .. } => {
                 value.get_or_insert_with(VecDeque::new).push_back(item);
             },
-            _ => {
-                // Do nothing
-            }
+            _ => { /* Do nothing */}
         }
     }
 
@@ -538,137 +565,80 @@ impl RespType {
         
     }
 
-    // pub fn get_value(self) -> Option<RespValue>{
-    //     // Get the inner value of simple type, bulk type, scalar type
-    //     // Destroy the struct in process
-    //     match self {
-    //         Self::SimpleStr(o) => {
-    //             if let Some(s) = o {
-    //                 return Some(RespValue::Str(s))
-    //             } else {
-    //                 return None
-    //             };
-    //         },
-    //         Self::Integer(o) => {
-    //             if let Some(x) = o {
-    //                 return Some(RespValue::Integer(x as i64))
-    //             } else {
-    //                 return None
-    //             };
-    //         },
-    //         Self::BulkStr { value, .. } => {
-    //             if let Some(s) = value {
-    //                 return Some(RespValue::Str(s));
-    //             } else {
-    //                 return None
-    //             }
-    //         },
-    //         _ => { return None }
-    //     }
-    // }
-
     pub fn get_str(self) -> Option<String> {
         match self {
-            Self::SimpleStr(o) => {
-                if let Some(s) = o {
-                    return Some(s)
-                } else {
-                    return None
-                };
-            },
-            Self::BulkStr { value, .. } => {
-                if let Some(s) = value {
-                    return Some(s);
-                } else {
-                    return None
-                }
-            },
-            _ => { return None }
+            Self::SimpleStr(o) => o,
+            Self::BulkStr { value, .. } => value,
+            _ => None
         }
     }
 
     pub fn get_int(self) -> Option<i64> {
         match self {
-            Self::Integer(o) => {
-                if let Some(x) = o {
-                    return Some(x)
-                } else {
-                    return None
-                };
-            },
-            _ => { return None }
+            Self::Integer(o) => o,
+            _ => None
         }
     }
 
-    fn serialize(&self) -> Option<String> {
+    pub fn serialize(&self) -> Vec<u8> {
         let prefix = self.get_prefix().to_string();
+        let mut output: Vec<u8> = Vec::new();
         match self {
             Self::Array { length, value } => {
-                let mut output = String::new();
-               
                 // Recursively serialize item
                 if let Some(v) = value {
-                    output.push_str(
-                        &format!(
-                            "{}{}{}", 
-                            &prefix,
-                            *length,
-                            DELIMITER,
-                        )
-                    );
+                    write!(&mut output,"{}{}{}", &prefix, *length, DELIMITER).unwrap();
                     for item in v.iter() {
-                        output.push_str(&item.serialize().unwrap());
+                        output.extend(&item.serialize());
                     };
-                    Some(output)
                 } else {
-                    // value = None for Null array
-                    Some(format!("{}{}{}", &prefix, -1, DELIMITER))
-                }
+                    write!(&mut output, "{}{}{}", &prefix, -1, DELIMITER).unwrap()
+                };
             },
             Self::BulkStr { length, value } => {
                 match value {
-                    Some(v) => Some(
-                        format!("{}{}{}{}{}", &prefix, *length, DELIMITER, v,DELIMITER)
-                        ),
-                    None => Some(
-                        format!("{}{}{}", &prefix, -1, DELIMITER)
-                        )
+                    Some(v) => {
+                        write!(
+                            &mut output, 
+                            "{}{}{}{}{}", 
+                            &prefix, *length, DELIMITER, v,DELIMITER).unwrap();
+                    },
+                    None => {
+                        write!(&mut output, "{}{}{}", &prefix, -1, DELIMITER).unwrap();
+                    },
                 }
             },
             Self::SimpleStr(o) => {
                 match o {
-                    Some(s) => Some(format!("{}{}{}", &prefix, s, DELIMITER)),
-                    None => None,
+                    Some(s) => {
+                        write!(&mut output, "{}{}{}", &prefix, s, DELIMITER).unwrap();
+                    },
+                    None => {},
                 }
             },
             Self::Integer(o) => {
                 match o {
-                    Some(x) => Some(format!("{}{}{}", &prefix, x, DELIMITER)),
-                    None => None,
+                    Some(x) => {
+                        write!(&mut output, "{}{}{}", &prefix, x, DELIMITER).unwrap()
+                    },
+                    None => {},
                 }
+            },
+            Self::RDB(Some(v)) => {
+                write!(&mut output, "{}{}{}", &prefix, v.len(), DELIMITER).unwrap();
+                output.extend_from_slice(v);
             },
             Self::Error(o) => {
                 match o {
-                    Some(s) => Some(format!("{}{}{}", &prefix, s, DELIMITER)),
-                    None => None,
+                    Some(s) => {
+                        write!(&mut output, "{}{}{}", &prefix, s, DELIMITER).unwrap()
+                    },
+                    None => {},
                 }
             },
-            _ => {
-                return None
-            }
-        }
-    }
-
-    pub fn to_bytes(&self) -> Option<Vec<u8>> {
-        let prefix = self.get_prefix().to_string();
-        match self {
-            Self::RDB(Some(v)) => {
-                let mut output = format!("{}{}{}", &prefix, v.len(), DELIMITER).into_bytes();
-                output.extend_from_slice(v);
-                Some(output)
-            },
-            _ => Some(self.serialize()?.into_bytes())
-        }
+            _ => todo!("Serialize not yet implemented")
+        };
+        output
     }
 }
 

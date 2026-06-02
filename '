@@ -1,8 +1,13 @@
-use std::collections::{VecDeque};
+use std::collections::{BTreeMap, HashSet};
+use std::collections::{HashMap, VecDeque, hash_map::Entry };
+use std::string::ParseError;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::u64;
 
 use crate::exceptions::CustomError;
-use crate::resp::{ RespType };
+use crate::resp::{ ParseStatus, RespType, RespValue };
+use crate::epoll::timer_create_event;
+use crate::utils::now;
 
 
 // Command Keyword
@@ -45,7 +50,6 @@ pub const KW_GETACK: &str = "GETACK";
 pub const KW_ACK: &str = "ACK";
 pub const KW_WAIT: &str = "WAIT";
 const KW_CONFIG: &str = "CONFIG";
-const KW_KEYS: &str = "KEYS";
 
 #[derive(Debug, PartialEq)]
 pub enum CmdArg {
@@ -124,7 +128,6 @@ pub enum Cmd {
     RDB(Vec<u8>),
     WAIT { count: u64, timeout_ms: Option<u64> },
     CONFIG(CmdArg),
-    KEYS(String),
 }
 
 impl Cmd {
@@ -142,25 +145,6 @@ impl Cmd {
     pub const fn always_response(&self) -> bool {
         match self {
             Self::REPLCONF(CmdArg::GETACK(_)) => {
-                true
-            },
-            _ => false
-        }
-    }
-
-    pub const fn is_flag_list(&self) -> bool {
-        match self {
-            Self::LPUSH { .. } | Self::RPUSH { .. } => {
-                true
-            },
-            _ => false
-        }
-    }
-
-    pub fn is_flag_stream(&self) -> bool {
-        match self {
-            Self::XADD { .. } => {
-                println!("Set flag stream");
                 true
             },
             _ => false
@@ -364,7 +348,7 @@ impl Cmd {
                     
                     let ts: Option<u64> = Some(t.parse::<u64>()?);
 
-                    if *i == "*" {
+                    if *i == "*".to_string() {
                         id = (ts, None);  
                     } else {
                         let idx: Option<u64> = Some(i.parse::<u64>()?);
@@ -505,7 +489,7 @@ impl Cmd {
                     )
                 };
 
-                let second = parse_u64_arg(&mut values)?;
+                let second = parse_u64_arg("COUNT", &mut values)?;
                 count = Some(second);
                 has_count = true;
             } else if first == KW_BLOCK {
@@ -516,7 +500,7 @@ impl Cmd {
                     )
                 };
 
-                let second = parse_u64_arg(&mut values)?;
+                let second = parse_u64_arg("BLOCK", &mut values)?;
                 block_ms = Some(second);
                 has_block = true;
             } else if first != KW_STREAMS {
@@ -719,16 +703,6 @@ impl Cmd {
         Ok(Cmd::CONFIG(opt))
     }
 
-    pub fn keys(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_arg = "No arg provided for KEYS";
-        let arg = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_arg.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_arg.to_string()))?;
-
-        Ok(Cmd::KEYS(arg))
-    }
-
     pub fn from_resp(resp_type: RespType) -> Result<Self, CustomError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -777,7 +751,6 @@ impl Cmd {
                                         KW_PSYNC => Self::psync(v),
                                         KW_WAIT => Self::wait(v),
                                         KW_CONFIG => Self::config(v),
-                                        KW_KEYS => Self::keys(v),
                                         _ => Err(
                                             CustomError::InvalidArgument("Invalid command".to_string()))
                                     } 

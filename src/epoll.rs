@@ -1,7 +1,7 @@
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{RawFd};
 use std::io;
 use std::os::unix::io::RawFd as ioRawFd;
-use libc::{self, timerfd_create, timerfd_settime, itimerspec,
+use libc::{self, timerfd_settime, itimerspec,
     CLOCK_MONOTONIC, TFD_NONBLOCK};
 
 // Event fired one then fd disarmed, prevent race condition in multi-thread

@@ -1,5 +1,7 @@
 #!/bin/bash
 {
+  printf "*1\r\n\$4\r\nPING\r\n"
+  sleep 0.1
   # ECHO grape
   printf "*2\r\n\$4\r\nECHO\r\n\$6\r\nbanana\r\n"
   
@@ -7,6 +9,9 @@
   printf "*1\r\n\$4\r\nPI"  # partial
   sleep 0.1
   printf "NG\r\n"           # remaining
+
+  sleep 0.1
+  printf "*1\r\n\$4\r\nPING\r\n"
 
   sleep 0.1
   printf "*"

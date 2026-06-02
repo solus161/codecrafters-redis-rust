@@ -1,12 +1,8 @@
 use std::cell::RefCell;
 use std::collections::hash_set::Iter;
-use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::AtomicI64;
 
 // Just a dump struct to store master and slave
-use crate::TcpClient;
-use crate::cmd_builder::Cmd;
 
 use std::collections::HashSet;
 
@@ -30,7 +26,7 @@ impl ClientTable {
             if *x == *client_id {self.master = None };
         };
         if let Some(h) = &mut self.slaves {
-            if h.contains(client_id) { h.remove(client_id); };
+            h.remove(client_id);
         };
         // self.clients.remove(&client_id)
     }

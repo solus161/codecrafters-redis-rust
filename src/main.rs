@@ -1,13 +1,10 @@
-#![allow(unused_imports)]
 use std::cell::RefCell;
 use std::env;
 use std::collections::HashMap;
 use std::net::{ TcpListener, TcpStream };
-use std::io::{self, BufRead, BufReader, Error, ErrorKind, Read, Write}; 
-use std::os::fd::{AsRawFd, RawFd};
-use std::collections::VecDeque;
+use std::io::{self, Write}; 
+use std::os::fd::{AsRawFd};
 use std::rc::Rc;
-use std::str::from_utf8;
 use libc;
 
 mod app_state;
@@ -21,15 +18,16 @@ mod resp;
 mod replication;
 mod tests;
 mod exceptions;
+mod rdb;
 
-use crate::app_state::{AppStates, Configs, ConfigsBuilder, ReplStats};
+use crate::app_state::{AppStates, Configs, ConfigsBuilder};
 use crate::client::{TcpClient, BUFFER_SIZE};
-use crate::epoll::{get_epoll_event_read, timer_create_event, timer_create_fd};
+use crate::epoll::{timer_create_fd};
 use crate::exceptions::{
     ERR_CREATING_EPOLL, ERR_HOST_STATS_NOT_INITIATED, 
     ERR_MASTER_STATS_HOST_NOT_SET, ERR_MASTER_STATS_PORT_NOT_SET};
-use crate::resp::RespParser;
 use crate::cmd_handler::CmdHandler;
+use crate::rdb::Rdb;
 use crate::replication::ClientTable;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Parsing args for configs
     ConfigsBuilder::new().with_parse_config(&args).build();
-
+    
     // Fd for master, replica #[cfg(test)]
     // let mut master: Option<TcpStream> = None;
 
@@ -61,45 +59,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cmd_handler = Rc::new(RefCell::new(CmdHandler::new(timer_fd)));
     
+    // Load RDB if any
+    if let (Some(path), Some(filename)) = Configs::get().get_rdb_filepath() {
+        let filepath = format!("{}/{}", path, filename);
+        if let Some(mut rdb) = Rdb::open(filepath) {
+            if let Ok(data) = rdb.read() {
+                cmd_handler.borrow_mut().load_data(data);
+            };
+        };
+        
+    }
+
     // Get fd on epoll event
     let epoll_fd = epoll::epoll_create().expect(ERR_CREATING_EPOLL);
 
     // Add a master if in slave
-    match app_state.get_master_stats() {
-        Some(repl_stats) => {
-            println!("Run as replica");
-            let host = repl_stats.get_host().expect(ERR_MASTER_STATS_HOST_NOT_SET);
-            let port = repl_stats.get_port().expect(ERR_MASTER_STATS_PORT_NOT_SET);
-            // Connect to master
-            let master = TcpStream::connect(format!("{}:{}", host, port))
-                .expect("Cannot connect to master");
-            let master_fd = master.as_raw_fd() as u64;
+    if let Some(repl_stats) =  app_state.get_master_stats() {
+        println!("Run as replica");
+        let host = repl_stats.get_host().expect(ERR_MASTER_STATS_HOST_NOT_SET);
+        let port = repl_stats.get_port().expect(ERR_MASTER_STATS_PORT_NOT_SET);
+        // Connect to master
+        let master = TcpStream::connect(format!("{}:{}", host, port))
+            .expect("Cannot connect to master");
+        let master_fd = master.as_raw_fd() as u64;
 
-            epoll::add_interest(
-                epoll_fd, master.as_raw_fd(), 
-                epoll::get_epoll_event_read(master_fd))?;
+        epoll::add_interest(
+            epoll_fd, master.as_raw_fd(), 
+            epoll::get_epoll_event_read(master_fd))?;
 
-            // Put master to the client table
-            let mut client_master = TcpClient::new(
-                master_fd,
-                epoll_fd,
-                master,
-                Rc::clone(&cmd_handler));
+        // Put master to the client table
+        let mut client_master = TcpClient::new(
+            master_fd,
+            epoll_fd,
+            master,
+            Rc::clone(&cmd_handler));
 
-            // Init handshake with master
-            client_master.init_handshake();
-            
-            // Store master
-            clients.insert(master_fd, client_master);
+        // Init handshake with master
+        client_master.init_handshake();
+        
+        // Store master
+        clients.insert(master_fd, client_master);
 
-            // Initiate handshake
-            // client_master.init_handshake();
-            // clients.insert(
-            //     master_fd.try_into().unwrap(),
-            //     client_master
-            //     );
-        },
-        None => {}
+        // Initiate handshake
+        // client_master.init_handshake();
+        // clients.insert(
+        //     master_fd.try_into().unwrap(),
+        //     client_master
+        //     );
     };
 
     // Add listener to epoll for changes

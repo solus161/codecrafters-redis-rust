@@ -1,18 +1,14 @@
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::error;
-use std::io::{self, Read, Write};
+use std::io::{ Read, Write };
 use std::net::TcpStream;
 use std::rc::Rc;
-use std::str::from_utf8;
-
-use base64::write;
 
 use crate::exceptions::{CustomError, ERR_HOST_STATS_NOT_INITIATED, ERR_MASTER_STATS_PORT_NOT_SET};
-use crate::{ AppStates, ReplStats };
+use crate::{ AppStates };
 use crate::cmd_handler::CmdHandler; 
 use crate::cmd_builder::{
-    Cmd, CmdArg, CmdError, KW_CAPA, KW_FULLRESYNC, KW_LISTENING_PORT, KW_OK, KW_PING, KW_PSYNC, KW_REPLCONF};
+    Cmd, KW_CAPA, KW_LISTENING_PORT, KW_PING, KW_PSYNC, KW_REPLCONF};
 use crate::resp::{ RespType, RespParser };
 use crate::ClientTable;
 
@@ -66,11 +62,11 @@ impl TcpClient {
         stream: TcpStream, 
         cmd_handler: Rc<RefCell<CmdHandler>>) -> Self {
         Self {
-            client_fd: client_fd,
-            epoll_fd: epoll_fd,
-            stream: stream,
+            client_fd,
+            epoll_fd,
+            stream,
             resp_parser: RespParser::new(),
-            cmd_handler: cmd_handler,
+            cmd_handler,
             handshake_state: HandShakeState::None,
             // repl_status: ReplStatus::None,
             repl_state: ReplState::new(),
@@ -111,10 +107,10 @@ impl TcpClient {
             //   must be propagated to other slave, without converting to cmd
             match self.resp_parser.get_completed() {
                 Some(t) => {
-                    println!("Completed type {:?}", t);
-                    let buf = t.to_bytes().unwrap(); // for broadcasting
+                    // println!("Completed type {:?}", t);
+                    let buf = t.serialize(); // for broadcasting
                     let cmd = Cmd::from_resp(t);
-                    let response: Result<Option<Vec<u8>>, Vec<u8>>;
+                    let response: Result<Vec<u8>, Vec<u8>>;
 
                     match cmd {
                         Ok(c) => {
@@ -141,16 +137,10 @@ impl TcpClient {
                     };
                     
                     match response { 
-                        Ok(Some(v)) => {
+                        Ok(v) | Err(v) => {
                             // No error, could broadcasting here
                             self.write_all(&v)?;
                         },
-                        Err(v) => {
-                            // No broadcasting
-                            self.write_all(&v)?;
-                        },
-                        _ => {}
-                        
                     };
                 },
                 None => break,
@@ -164,7 +154,7 @@ impl TcpClient {
     }
 
     fn handshake_to_master(&mut self, cmd: Cmd, buf: Vec<u8>, client_id: u64, epoll_fd: i32)
-        -> Result<Option<Vec<u8>>, Vec<u8>> {
+        -> Result<Vec<u8>, Vec<u8>> {
         // Client establishes handshake
         // println!("Cmd from master {:?}", &cmd);
         match self.handshake_state {
@@ -184,7 +174,7 @@ impl TcpClient {
                 self.handshake_state = HandShakeState::Established;
                 let _ =ClientTable::get().borrow_mut().set_master(client_id);
                 self.parse_rdb = true;
-                Ok(None)
+                Ok(vec![])
             },
             HandShakeState::Established if matches!(cmd, Cmd::RDB(_)) => {
                 // Do st with the RDB
@@ -195,7 +185,7 @@ impl TcpClient {
                     .ok_or_else(||
                         CustomError::InternalError(ERR_HOST_STATS_NOT_INITIATED.to_string()))?
                         .start_bytes_count();
-                Ok(None)
+                Ok(Vec::new())
             },
             _ => {
                 // TODO
@@ -210,10 +200,10 @@ impl TcpClient {
         let mut arr = RespType::Array { length: 1, value: None};
         let ping = RespType::BulkStr { length: KW_PING.len(), value: Some(KW_PING.to_string()) };
         arr.add_item(ping);
-        let _ = self.stream.write_all(&arr.to_bytes().unwrap());
+        let _ = self.stream.write_all(&arr.serialize());
     }
 
-    fn get_replconf1(&self) -> Result<Option<Vec<u8>>, Vec<u8>> {
+    fn get_replconf1(&self) -> Result<Vec<u8>, Vec<u8>> {
         // Return RESP bytes representing: REPLCONF listening-port <PORT>
         let mut arr = RespType::Array { length: 3, value: None }; 
         let resp_replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
@@ -230,10 +220,10 @@ impl TcpClient {
         arr.add_item(resp_replconf);
         arr.add_item(resp_listening);
         arr.add_item(resp_port);
-        Ok(arr.to_bytes())
+        Ok(arr.serialize())
     }
 
-    fn get_replconf2(&self) -> Result<Option<Vec<u8>>, Vec<u8>> {
+    fn get_replconf2(&self) -> Result<Vec<u8>, Vec<u8>> {
         let mut arr = RespType::Array { length: 3, value: None }; 
         let resp_replconf = RespType::BulkStr { length: KW_REPLCONF.len(), value: Some(KW_REPLCONF.to_string()) };
         let resp_capa = RespType::BulkStr { length: KW_CAPA.len(), value: Some(KW_CAPA.to_string()) };
@@ -242,10 +232,10 @@ impl TcpClient {
         arr.add_item(resp_replconf);
         arr.add_item(resp_capa);
         arr.add_item(resp_psync);
-        Ok(arr.to_bytes())
+        Ok(arr.serialize())
     }
 
-    fn get_psync(&self) -> Result<Option<Vec<u8>>, Vec<u8>> {
+    fn get_psync(&self) -> Result<Vec<u8>, Vec<u8>> {
         let mut arr = RespType::Array { length: 3, value: None }; 
         let resp_psync = RespType::BulkStr { length: KW_PSYNC.len(), value: Some(KW_PSYNC.to_string()) };
         let resp_id = RespType::BulkStr { 
@@ -258,6 +248,6 @@ impl TcpClient {
         arr.add_item(resp_psync);
         arr.add_item(resp_id);
         arr.add_item(resp_offset);
-        Ok(arr.to_bytes())
+        Ok(arr.serialize())
     }
 }
