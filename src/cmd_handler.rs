@@ -430,7 +430,7 @@ impl CmdHandler {
             Cmd::PSUBSCRIBE => Ok(None),
             Cmd::PUNSUBSCRIBE => Ok(None),
             Cmd::QUIT => Ok(None),
-            Cmd::PUBLISH { key, message } => self.cmd_publish(key, message, client_id),
+            Cmd::PUBLISH { key, message } => self.cmd_publish(key, message),
             // _ => None
         };
 
@@ -1839,61 +1839,57 @@ impl CmdHandler {
         match self.subscribers.get(&rc) {
             Some(client_rc) => {
                 keys.drain(..).for_each(|k| {
+                    self.channels.entry(k.clone()).or_insert(HashSet::new())
+                        .insert(client_rc.clone());
+
                     let count = Rc::strong_count(&client_rc);
                     responses.extend(
-                        Self::_get_subscribe_response(&k, count)
+                        Self::_get_subscribe_response(&k, count - 1)
                     );
-
-                    self.channels.entry(k).or_insert(HashSet::new())
-                    .insert(client_rc.clone());
-                    }
-                );
+                });
             },
             None => {
                 self.subscribers.insert(rc.clone());
                 keys.drain(..).for_each(|k| {
+                    self.channels.entry(k.clone()).or_insert(HashSet::new())
+                        .insert(rc.clone());
+
                     let count = Rc::strong_count(&rc);
                     responses.extend(
-                        Self::_get_subscribe_response(&k, count - 1)
+                        Self::_get_subscribe_response(&k, count - 2)
                     );
-
-                    self.channels.entry(k.clone()).or_insert(HashSet::new())
-                    .insert(rc.clone()); 
-                    }
-                );
+                });
             },
         };
         Ok(Some(RespType::Bytes(Some(responses))))
     }
 
-    fn cmd_publish(&mut self, key: String, message: String, client_id: u64) 
+    fn cmd_publish(&mut self, key: String, message: String) 
         -> Result<Option<RespType>, CustomError>
     {
-        if self.is_subscriber(&client_id) {
-            if let Some(set) = self.channels.get(&key) {
-                let msg_kw = "message";
-                let mut resp_arr = RespType::Array { length: 3, value: None };
-                let resp_kw = RespType::BulkStr { length: msg_kw.len(), value: Some(msg_kw.to_string()) };
-                let resp_channel = RespType::BulkStr { length: key.len(), value: Some(key) };
-                let resp_msg = RespType::BulkStr { length: message.len(), value: Some(message) };
-                
-                resp_arr.add_item(resp_kw);
-                resp_arr.add_item(resp_channel);
-                resp_arr.add_item(resp_msg);
+        
+        if let Some(set) = self.channels.get(&key) {
+            let msg_kw = "message";
+            let mut resp_arr = RespType::Array { length: 3, value: None };
+            let resp_kw = RespType::BulkStr { length: msg_kw.len(), value: Some(msg_kw.to_string()) };
+            let resp_channel = RespType::BulkStr { length: key.len(), value: Some(key) };
+            let resp_msg = RespType::BulkStr { length: message.len(), value: Some(message) };
+            
+            resp_arr.add_item(resp_kw);
+            resp_arr.add_item(resp_channel);
+            resp_arr.add_item(resp_msg);
 
-                let response_rc: Rc<Vec<u8>> = Rc::from(resp_arr.serialize());
+            let response_rc: Rc<Vec<u8>> = Rc::from(resp_arr.serialize());
 
-                set.iter().for_each(|i| {
-                    self.response_queue.push((**i, response_rc.clone())); 
-                }); 
+            set.iter().for_each(|i| {
+                self.response_queue.push((**i, response_rc.clone())); 
+            }); 
 
-                Ok(Some(RespType::Integer(Some(set.len() as i64))))
-            } else {
-                Ok(None)
-            }
+            Ok(Some(RespType::Integer(Some(set.len() as i64))))
         } else {
             Ok(None)
         }
+        
     }
 
     fn _get_unsubscibe_response(channel: &str, count: i64) -> RespType {
