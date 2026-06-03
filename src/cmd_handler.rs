@@ -140,7 +140,7 @@ impl RequestRegistry {
         mut request_entry: RequestEntry) {
         // Insert a RequestEntry to the Registry storage structure
         // A RequestEntry will be stored in: 
-        // - self.store as the center storage, distinguished by signature timestamp
+   // - self.store as the center storage, distinguished by signature timestamp
         // - a deadline queue, to signify what action to take when that Entry expires,
         //   the signature is deadline, also unique for each entry
         // - a dedicated list/hashmap/hashset etc. to store the fullfilment progress
@@ -327,6 +327,10 @@ pub struct CmdHandler {
     registry: RequestRegistry,
     flag_backlog_list: bool,    // true to trigger matching
     flag_backlog_stream: bool,  // true to trigger matching
+                                //
+    // channel name - list of client id
+    subscribers: HashSet<Rc<u64>>,
+    channels: HashMap<String, HashSet<Rc<u64>>>,
  }
 
 impl CmdHandler {
@@ -337,6 +341,8 @@ impl CmdHandler {
             registry: RequestRegistry::new(timer_fd),
             flag_backlog_list: false,
             flag_backlog_stream: false,
+            subscribers: HashSet::new(), 
+            channels: HashMap::new(),
         }
     }
 
@@ -401,6 +407,7 @@ impl CmdHandler {
             Cmd::WAIT { count, timeout_ms } => self.cmd_wait(count, timeout_ms, client_id, epoll_fd),
             Cmd::CONFIG(arg) => Self::cmd_config(arg),
             Cmd::KEYS(arg) => self.cmd_keys(arg),
+            Cmd::SUBSCRIBE(keys) => self.cmd_subscribe(keys, client_id),
             // _ => None
         };
 
@@ -1752,5 +1759,53 @@ impl CmdHandler {
         } else {
             Err(CustomError::InvalidArgument("Invalid arg for KEYS".to_string()))
         }
+    }
+
+    fn _get_subscribe_response(channel: &str, count: usize) -> Vec<u8> {
+        let kw = "subscribe";
+        let mut resp_arr = RespType::Array { length: 3, value: None };
+        let resp_kw = RespType::BulkStr { length: kw.len(), value: Some(kw.to_string()) };
+        let resp_channel = RespType::BulkStr { length: channel.len(), value: Some(channel.to_string()) };
+        let resp_count = RespType::Integer(Some(count as i64));
+        resp_arr.add_item(resp_kw);
+        resp_arr.add_item(resp_channel);
+        resp_arr.add_item(resp_count);
+        resp_arr.serialize()
+    }
+
+    fn cmd_subscribe(&mut self, mut keys: Vec<String>, client_id: u64)
+        -> Result<Option<RespType>, CustomError>
+    {
+        let rc = Rc::from(client_id);
+        let mut responses: Vec<u8> = Vec::new();
+        match self.subscribers.get(&rc) {
+            Some(client_rc) => {
+                keys.drain(..).for_each(|k| {
+                    let count = Rc::strong_count(&client_rc);
+                    responses.extend(
+                        Self::_get_subscribe_response(&k, count)
+                    );
+
+                    self.channels.entry(k).or_insert(HashSet::new())
+                    .insert(client_rc.clone());
+                    }
+                );
+            },
+            None => {
+                self.subscribers.insert(rc.clone());
+                keys.drain(..).for_each(|k| {
+                    let count = Rc::strong_count(&rc);
+                    responses.extend(
+                        Self::_get_subscribe_response(&k, count - 1)
+                    );
+
+                    self.channels.entry(k.clone()).or_insert(HashSet::new())
+                    .insert(rc.clone()); 
+                    }
+                );
+            },
+        };
+        self.response_queue.push((client_id, Rc::from(responses)));
+        Ok(None)
     }
 }

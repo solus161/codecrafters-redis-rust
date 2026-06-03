@@ -46,6 +46,7 @@ pub const KW_ACK: &str = "ACK";
 pub const KW_WAIT: &str = "WAIT";
 const KW_CONFIG: &str = "CONFIG";
 const KW_KEYS: &str = "KEYS";
+const KW_SUBSCRIBE: &str = "SUBSCRIBE";
 
 #[derive(Debug, PartialEq)]
 pub enum CmdArg {
@@ -125,6 +126,7 @@ pub enum Cmd {
     WAIT { count: u64, timeout_ms: Option<u64> },
     CONFIG(CmdArg),
     KEYS(String),
+    SUBSCRIBE(Vec<String>),
 }
 
 impl Cmd {
@@ -729,6 +731,18 @@ impl Cmd {
         Ok(Cmd::KEYS(arg))
     }
 
+    pub fn subscribe(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_arg = "No arg provided for KEYS";
+
+        let mut channels = Vec::new();
+        let _ = values.drain(..).try_for_each(|r| -> Result<(), CustomError> {
+            channels.push(r.get_str()
+                .ok_or(CustomError::MissingArgument(msg_arg.to_string()))?);
+            Ok(())
+        });
+        Ok(Self::SUBSCRIBE(channels))
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CustomError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -778,6 +792,7 @@ impl Cmd {
                                         KW_WAIT => Self::wait(v),
                                         KW_CONFIG => Self::config(v),
                                         KW_KEYS => Self::keys(v),
+                                        KW_SUBSCRIBE => Self::subscribe(v),
                                         _ => Err(
                                             CustomError::InvalidArgument("Invalid command".to_string()))
                                     } 
