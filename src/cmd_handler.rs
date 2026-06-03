@@ -6,15 +6,19 @@ use std::ops::Bound::{Excluded, Unbounded};
 use std::rc::Rc;
 
 
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{ Engine, engine::general_purpose::STANDARD };
 
-use crate::exceptions::{CustomError, ERR_HOST_STATS_NOT_INITIATED, ERR_MASTER_STATS_HOST_NOT_SET, ERR_MASTER_STATS_NOT_INITIATED, ERR_MASTER_STATS_PORT_NOT_SET};
+use crate::exceptions::{
+    CustomError, ERR_HOST_STATS_NOT_INITIATED, ERR_MASTER_STATS_HOST_NOT_SET,
+    ERR_MASTER_STATS_NOT_INITIATED, ERR_MASTER_STATS_PORT_NOT_SET};
 use crate::resp::{ RespType };
-use crate::epoll::{add_interest, get_epoll_event_read, remove_interest, timer_create_event};
+use crate::epoll::{
+    add_interest, get_epoll_event_read,
+    remove_interest, timer_create_event};
 use crate::cmd_builder::{ Cmd, CmdArg, KW_ACK, KW_FULLRESYNC, KW_GETACK, KW_PONG, KW_QUEUED, KW_REPLCONF, KW_REPLICATION };
 use crate::utils::now;
 use crate::app_state::{AppStates, Configs};
-use crate::{ClientTable, client};
+use crate::{ClientTable};
 
 // Stored value types for CmdHandler
 #[derive(Debug)]
@@ -354,7 +358,8 @@ impl CmdHandler {
         &mut self, cmd: Cmd, buf: Vec<u8>, client_id: u64, epoll_fd: Option<i32>,
         serialized: bool) -> Result<CmdOutput, CmdOutput> {
         // Check for subscriber mode and subscriber-allowed cmd
-        if self.is_subscriber(&client_id) {
+        let is_subscriber = self.is_subscriber(&client_id);
+        if is_subscriber {
             if !Self::is_cmd_subscriber_allowed(&cmd) {
                 let mut cmd_name = cmd.get_name();
                 cmd_name.make_ascii_lowercase();
@@ -389,7 +394,7 @@ impl CmdHandler {
 
         println!("Client id {}, Cmd received {:?}, to be broadcast {}", &client_id, &cmd, &to_be_broadcast);
         let output: Result<Option<RespType>, CustomError> = match cmd {
-            Cmd::PING => Self::cmd_ping(),
+            Cmd::PING => Self::cmd_ping(is_subscriber),
             Cmd::PONG => Ok(None), // handle at client level when handshaking
             Cmd::OK => Ok(None),
             Cmd::ECHO(s) => Self::cmd_echo(s),
@@ -421,10 +426,11 @@ impl CmdHandler {
             Cmd::CONFIG(arg) => Self::cmd_config(arg),
             Cmd::KEYS(arg) => self.cmd_keys(arg),
             Cmd::SUBSCRIBE(keys) => self.cmd_subscribe(keys, client_id),
-            Cmd::UNSUBSCRIBE => Ok(None),
+            Cmd::UNSUBSCRIBE(key) => self.cmd_unsubscribe(key, client_id),
             Cmd::PSUBSCRIBE => Ok(None),
             Cmd::PUNSUBSCRIBE => Ok(None),
-            Cmd::QUIT => Ok(None)
+            Cmd::QUIT => Ok(None),
+            Cmd::PUBLISH { key, message } => self.cmd_publish(key, message, client_id),
             // _ => None
         };
 
@@ -534,9 +540,9 @@ impl CmdHandler {
 
     fn is_cmd_subscriber_allowed(cmd: &Cmd) -> bool {
         match cmd {
-            Cmd::SUBSCRIBE(_) | Cmd::UNSUBSCRIBE |
+            Cmd::SUBSCRIBE(_) | Cmd::UNSUBSCRIBE(_) |
                 Cmd::PSUBSCRIBE | Cmd::PUNSUBSCRIBE |
-                Cmd::QUIT => {
+                Cmd::PING | Cmd::QUIT => {
                     true
                 },
             _ => false
@@ -691,8 +697,21 @@ impl CmdHandler {
         self.flag_backlog_stream = false;
     }
 
-    fn cmd_ping() -> Result<Option<RespType>, CustomError> {
-        Ok(Some(RespType::SimpleStr(Some(KW_PONG.to_string()))))
+    fn cmd_ping(is_subscriber: bool) -> Result<Option<RespType>, CustomError> {
+        if !is_subscriber {
+            Ok(Some(RespType::SimpleStr(Some(KW_PONG.to_string()))))
+        } else {
+            let mut resp_arr = RespType::Array { length: 2, value: None };
+            let resp_pong = RespType::BulkStr {
+                length: KW_PONG.len(),
+                value: Some(KW_PONG.to_string().to_lowercase())
+            };
+            let resp_emtpy = RespType::BulkStr { length: 0, value: Some("".to_string()) };
+
+            resp_arr.add_item(resp_pong);
+            resp_arr.add_item(resp_emtpy);
+            Ok(Some(resp_arr))
+        }
     }
 
     fn cmd_echo(s: String) -> Result<Option<RespType>, CustomError> {
@@ -1845,5 +1864,77 @@ impl CmdHandler {
             },
         };
         Ok(Some(RespType::Bytes(Some(responses))))
+    }
+
+    fn cmd_publish(&mut self, key: String, message: String, client_id: u64) 
+        -> Result<Option<RespType>, CustomError>
+    {
+        if self.is_subscriber(&client_id) {
+            if let Some(set) = self.channels.get(&key) {
+                let msg_kw = "message";
+                let mut resp_arr = RespType::Array { length: 3, value: None };
+                let resp_kw = RespType::BulkStr { length: msg_kw.len(), value: Some(msg_kw.to_string()) };
+                let resp_channel = RespType::BulkStr { length: key.len(), value: Some(key) };
+                let resp_msg = RespType::BulkStr { length: message.len(), value: Some(message) };
+                
+                resp_arr.add_item(resp_kw);
+                resp_arr.add_item(resp_channel);
+                resp_arr.add_item(resp_msg);
+
+                let response_rc: Rc<Vec<u8>> = Rc::from(resp_arr.serialize());
+
+                set.iter().for_each(|i| {
+                    self.response_queue.push((**i, response_rc.clone())); 
+                }); 
+
+                Ok(Some(RespType::Integer(Some(set.len() as i64))))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn _get_unsubscibe_response(channel: &str, count: i64) -> RespType {
+        let mut resp_arr = RespType::Array { length: 3, value: None };
+        let kw = "unsubscribe";
+        let resp_kw = RespType::BulkStr { length: kw.len(), value: Some(kw.to_string()) };
+        let resp_channel = RespType::BulkStr { length: channel.len(), value: Some(channel.to_string()) };
+        let resp_count = RespType::Integer(Some(count));
+
+        resp_arr.add_item(resp_kw);
+        resp_arr.add_item(resp_channel);
+        resp_arr.add_item(resp_count);
+        resp_arr
+    }
+
+    fn cmd_unsubscribe(&mut self, key: String, client_id: u64) -> Result<Option<RespType>, CustomError> {
+        let mut unsubscribe_all = false;
+        let output: Result<Option<RespType>, CustomError>;
+        if let Some(subscriber) = self.subscribers.get(&Rc::from(client_id)) {
+            if let Some(ref mut set) = self.channels.get_mut(&key) {
+                // Real unsubscribe
+                let _ = set.remove(subscriber);
+                let count = (Rc::strong_count(&subscriber) - 1) as i64;
+                let msg = Self::_get_unsubscibe_response(&key, count);
+
+                unsubscribe_all = count == 0;
+                output = Ok(Some(msg));
+            } else {
+                // Not subscribe to channel
+                let count = (Rc::strong_count(&subscriber) - 1) as i64;
+                let msg = Self::_get_unsubscibe_response(&key, count);
+                output = Ok(Some(msg));
+            }
+        } else {
+            // Not a subscriber
+            output = Ok(None);
+        };
+        
+        if unsubscribe_all {
+            self.subscribers.remove(&Rc::from(client_id));
+        };
+        output
     }
 }

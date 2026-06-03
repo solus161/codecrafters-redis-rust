@@ -51,6 +51,7 @@ const KW_UNSUBSCRIBE: &str = "UNSUBSCRIBE";
 const KW_PSUBSCRIBE: &str = "PSUBSCRIBE";
 const KW_PUNSUBSCRIBE: &str = "PUNSUBSCRIBE";
 const KW_QUIT: &str = "QUIT";
+const KW_PUBLISH: &str = "PUBLISH";
 
 
 #[derive(Debug, PartialEq)]
@@ -132,10 +133,11 @@ pub enum Cmd {
     CONFIG(CmdArg),
     KEYS(String),
     SUBSCRIBE(Vec<String>),
-    UNSUBSCRIBE,
+    UNSUBSCRIBE(String),
     PSUBSCRIBE,
     PUNSUBSCRIBE,
     QUIT,
+    PUBLISH{ key: String, message: String }
 }
 
 impl Cmd {
@@ -757,8 +759,14 @@ impl Cmd {
         Ok(Self::SUBSCRIBE(channels))
     }
 
-    pub fn unsubscribe() -> Result<Self, CustomError> {
-        Ok(Self::UNSUBSCRIBE)
+    pub fn unsubscribe(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_arg = "No arg provided for UNSUBSCRIBE";
+        let key = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_arg.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_arg.to_string()))?;
+
+        Ok(Self::UNSUBSCRIBE(key))
     }
 
     pub fn psubscribe() -> Result<Self, CustomError> {
@@ -771,6 +779,22 @@ impl Cmd {
 
     pub fn quit() -> Result<Self, CustomError> {
         Ok(Self::QUIT)
+    }
+
+    fn publish(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No channel name provided for PUBLISH";
+        let key = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+
+        let msg_msg = "No message provided for PUBLISH";
+        let message = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_msg.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_msg.to_string()))?;
+
+        Ok(Self::PUBLISH { key, message })
     }
 
     pub fn from_resp(resp_type: RespType) -> Result<Self, CustomError> {
@@ -823,10 +847,11 @@ impl Cmd {
                                         KW_CONFIG => Self::config(v),
                                         KW_KEYS => Self::keys(v),
                                         KW_SUBSCRIBE => Self::subscribe(v),
-                                        KW_UNSUBSCRIBE => Self::unsubscribe(),
+                                        KW_UNSUBSCRIBE => Self::unsubscribe(v),
                                         KW_PSUBSCRIBE => Self::psubscribe(),
                                         KW_PUNSUBSCRIBE => Self::punsubscribe(),
                                         KW_QUIT => Self::quit(),
+                                        KW_PUBLISH => Self::publish(v),
                                         _ => Err(
                                             CustomError::InvalidArgument("Invalid command".to_string()))
                                     } 
