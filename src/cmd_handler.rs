@@ -14,7 +14,7 @@ use crate::epoll::{add_interest, get_epoll_event_read, remove_interest, timer_cr
 use crate::cmd_builder::{ Cmd, CmdArg, KW_ACK, KW_FULLRESYNC, KW_GETACK, KW_PONG, KW_QUEUED, KW_REPLCONF, KW_REPLICATION };
 use crate::utils::now;
 use crate::app_state::{AppStates, Configs};
-use crate::ClientTable;
+use crate::{ClientTable, client};
 
 // Stored value types for CmdHandler
 #[derive(Debug)]
@@ -353,6 +353,19 @@ impl CmdHandler {
     fn _execute_cmd(
         &mut self, cmd: Cmd, buf: Vec<u8>, client_id: u64, epoll_fd: Option<i32>,
         serialized: bool) -> Result<CmdOutput, CmdOutput> {
+        // Check for subscriber mode and subscriber-allowed cmd
+        if self.is_subscriber(&client_id) {
+            if !Self::is_cmd_subscriber_allowed(&cmd) {
+                let mut cmd_name = cmd.get_name();
+                cmd_name.make_ascii_lowercase();
+                let msg = format!("ERR Can't execute '{}': \
+                           only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE \
+                           / PING / QUIT / RESET are allowed in this context", cmd_name);
+                let err = CustomError::UnsupportedCmd(msg.to_string());
+                return Err(CmdOutput::Bytes(err.into_error_bytes()));
+            }
+        };
+
         // Set dirty first
         self.registry.set_dirty(&cmd); 
         let to_be_broadcast = cmd.to_be_broadcast();
@@ -408,6 +421,10 @@ impl CmdHandler {
             Cmd::CONFIG(arg) => Self::cmd_config(arg),
             Cmd::KEYS(arg) => self.cmd_keys(arg),
             Cmd::SUBSCRIBE(keys) => self.cmd_subscribe(keys, client_id),
+            Cmd::UNSUBSCRIBE => Ok(None),
+            Cmd::PSUBSCRIBE => Ok(None),
+            Cmd::PUNSUBSCRIBE => Ok(None),
+            Cmd::QUIT => Ok(None)
             // _ => None
         };
 
@@ -507,6 +524,23 @@ impl CmdHandler {
             },
             Err(e) => Err(e.into_error_bytes())
         } 
+    }
+
+    fn is_subscriber(&self, client_id: &u64) -> bool {
+        // To check whether the client is a subscriber
+        // and the cmd is the subscriber-allowed ones
+        self.subscribers.contains(client_id)
+    }
+
+    fn is_cmd_subscriber_allowed(cmd: &Cmd) -> bool {
+        match cmd {
+            Cmd::SUBSCRIBE(_) | Cmd::UNSUBSCRIBE |
+                Cmd::PSUBSCRIBE | Cmd::PUNSUBSCRIBE |
+                Cmd::QUIT => {
+                    true
+                },
+            _ => false
+        }
     }
 
     fn extract_deadline(opt: Option<CmdArg>) -> Option<u64> {
@@ -1498,26 +1532,31 @@ impl CmdHandler {
     {
         if id == "?" && offset == -1 {
             // If sending client is slave
+            let mut responses: Vec<u8> = Vec::new();
             let stats = AppStates::get().get_host_stats()
                 .ok_or(CustomError::InternalError(ERR_HOST_STATS_NOT_INITIATED.to_string()))?;
             let id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"; // TODO: for testing only
             let offset = stats.get_offset().max(0);
             let msg = format!("{} {} {}", &KW_FULLRESYNC, &id, &offset);
-            self.response_queue.push((client_id, RespType::SimpleStr(Some(msg)).serialize().into()));
+            let resp_fullresync = RespType::SimpleStr(Some(msg)).serialize();
+            // self.response_queue.push((client_id, RespType::SimpleStr(Some(msg)).serialize().into()));
+            responses.extend(resp_fullresync);
 
             // Example
             let empty_rdb_b64 = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
             let empty_rdb = STANDARD.decode(empty_rdb_b64).unwrap();
-            self.response_queue.push((
-                client_id,
-                RespType::RDB(Some(empty_rdb)).serialize().into()
-            ));
+            // self.response_queue.push((
+            //     client_id,
+            //     RespType::RDB(Some(empty_rdb)).serialize().into()
+            // ));
+            let resp_rdb = RespType::RDB(Some(empty_rdb)).serialize();
+            responses.extend(resp_rdb);
             
             // Set client as slave
             println!("Set client {} as slave", &client_id);
             let _ = ClientTable::get().borrow_mut().set_slave(client_id);
 
-            Ok(None)
+            Ok(Some(RespType::Bytes(Some(responses))))
         } else {
             Ok(None)
         }
@@ -1805,7 +1844,6 @@ impl CmdHandler {
                 );
             },
         };
-        self.response_queue.push((client_id, Rc::from(responses)));
-        Ok(None)
+        Ok(Some(RespType::Bytes(Some(responses))))
     }
 }

@@ -411,6 +411,7 @@ pub enum RespType {
     Set,
     Push,
     RDB(Option<Vec<u8>>),
+    Bytes(Option<Vec<u8>>),
 }
 
 
@@ -460,6 +461,7 @@ impl RespType {
             Self::Set => "~",
             Self::Push => ">",
             Self::RDB(_) => "$",
+            Self::Bytes(_) => "",
         }
     }
 
@@ -634,6 +636,12 @@ impl RespType {
                         write!(&mut output, "{}{}{}", &prefix, s, DELIMITER).unwrap()
                     },
                     None => {},
+                }
+            },
+            Self::Bytes(o) => {
+                match o {
+                    Some(b) => { output.extend(b) },
+                    None => {}
                 }
             },
             _ => todo!("Serialize not yet implemented")

@@ -47,6 +47,11 @@ pub const KW_WAIT: &str = "WAIT";
 const KW_CONFIG: &str = "CONFIG";
 const KW_KEYS: &str = "KEYS";
 const KW_SUBSCRIBE: &str = "SUBSCRIBE";
+const KW_UNSUBSCRIBE: &str = "UNSUBSCRIBE";
+const KW_PSUBSCRIBE: &str = "PSUBSCRIBE";
+const KW_PUNSUBSCRIBE: &str = "PUNSUBSCRIBE";
+const KW_QUIT: &str = "QUIT";
+
 
 #[derive(Debug, PartialEq)]
 pub enum CmdArg {
@@ -127,9 +132,18 @@ pub enum Cmd {
     CONFIG(CmdArg),
     KEYS(String),
     SUBSCRIBE(Vec<String>),
+    UNSUBSCRIBE,
+    PSUBSCRIBE,
+    PUNSUBSCRIBE,
+    QUIT,
 }
 
 impl Cmd {
+    pub fn get_name(&self) -> String {
+        let name = format!("{:?}", self);
+        name.split(&['(', ' ', '{']).next().unwrap().to_string()
+    }
+
     pub const fn to_be_broadcast(&self) -> bool {
         match self {
             Self::SET { .. } | Self::LPUSH { .. } | Self::RPUSH { .. } |
@@ -743,6 +757,22 @@ impl Cmd {
         Ok(Self::SUBSCRIBE(channels))
     }
 
+    pub fn unsubscribe() -> Result<Self, CustomError> {
+        Ok(Self::UNSUBSCRIBE)
+    }
+
+    pub fn psubscribe() -> Result<Self, CustomError> {
+        Ok(Self::PSUBSCRIBE)
+    }
+
+    pub fn punsubscribe() -> Result<Self, CustomError> {
+        Ok(Self::PUNSUBSCRIBE)
+    }
+
+    pub fn quit() -> Result<Self, CustomError> {
+        Ok(Self::QUIT)
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CustomError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -793,6 +823,10 @@ impl Cmd {
                                         KW_CONFIG => Self::config(v),
                                         KW_KEYS => Self::keys(v),
                                         KW_SUBSCRIBE => Self::subscribe(v),
+                                        KW_UNSUBSCRIBE => Self::unsubscribe(),
+                                        KW_PSUBSCRIBE => Self::psubscribe(),
+                                        KW_PUNSUBSCRIBE => Self::punsubscribe(),
+                                        KW_QUIT => Self::quit(),
                                         _ => Err(
                                             CustomError::InvalidArgument("Invalid command".to_string()))
                                     } 
