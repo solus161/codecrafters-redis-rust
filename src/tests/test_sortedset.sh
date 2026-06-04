@@ -6,4 +6,6 @@
 
   printf "*3\r\n\$5\r\nZRANK\r\n\$3\r\nkey\r\n\$4\r\nhehe\r\n"
   printf "*3\r\n\$5\r\nZRANK\r\n\$3\r\nkey\r\n\$4\r\nzzzz\r\n"
+  
+  printf "*4\r\n\$6\r\nZRANGE\r\n\$3\r\nkey\r\n\$1\r\n2\r\n\$1\r\n0\r\n"
 } | nc localhost 6379

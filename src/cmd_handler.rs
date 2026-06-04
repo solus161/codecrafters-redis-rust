@@ -104,6 +104,8 @@ impl SortedSet {
             end_idx
         };
 
+        if end_idx < start_idx { return Vec::new()};
+
         self.scores.iter()
             .skip(start_idx as usize)
             .take((end_idx - start_idx + 1) as usize)
@@ -2092,12 +2094,17 @@ impl CmdHandler {
         match &store_item.value {
             StoreValue::ZSet(set) => {
                 let mut members = set.get_members(start, end); 
-                let mut resp_arr = RespType::Array { length: members.len(), value: None };
-                members.drain(..).for_each(|s| {
-                    let resp_member = RespType::BulkStr { length: s.len(), value: Some(s) };
-                    resp_arr.add_item(resp_member);
-                });
-                Ok(Some(resp_arr))
+                
+                if members.is_empty() {
+                    Ok(Some(RespType::Array { length: 0, value: Some(VecDeque::new()) }))
+                } else {
+                    let mut resp_arr = RespType::Array { length: members.len(), value: None };
+                    members.drain(..).for_each(|s| {
+                        let resp_member = RespType::BulkStr { length: s.len(), value: Some(s) };
+                        resp_arr.add_item(resp_member);
+                    });
+                    Ok(Some(resp_arr))
+                }
             },
             _ => Err(CustomError::UnprocessableError("Wrong type".to_string())),
         }        
