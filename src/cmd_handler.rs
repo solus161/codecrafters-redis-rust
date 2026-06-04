@@ -2113,7 +2113,7 @@ impl CmdHandler {
     fn cmd_zcard(&self, key: String) -> Result<Option<RespType>, CustomError> {
         let Some(store_item) = self.data.get(&key) else {
             return Ok(Some(
-                RespType::Array { length: 0, value: Some(VecDeque::new()) }
+                RespType::Integer(Some(0))
             ))
         };
 
