@@ -117,8 +117,10 @@ impl SortedSet {
         self.members.get(member).copied()
     }
 
-    pub fn remove(&mut self, member: &Rc<String>) -> i64 {
-        if self.members.remove(member).is_some() {
+    pub fn remove(&mut self, member: String) -> i64 {
+        let member_rc = Rc::from(member);
+        if let Some(score) =  self.members.remove(&member_rc) {
+            self.scores.remove(&(Score(score), member_rc));
             1
         } else {
             0
@@ -2152,7 +2154,7 @@ impl CmdHandler {
 
         match &mut store_item.value {
             StoreValue::ZSet(set) => {
-                let count = set.remove(&Rc::from(member));
+                let count = set.remove(member);
                 Ok(Some(RespType::Integer(Some(count))))
             },
             _ => Err(CustomError::UnprocessableError("Wrong type".to_string())),
