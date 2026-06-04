@@ -1,11 +1,13 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
 use std::u64;
 use std::ops::Bound::{Excluded, Unbounded};
 use std::rc::Rc;
 
 
+use base64::write;
 use base64::{ Engine, engine::general_purpose::STANDARD };
 
 use crate::exceptions::{
@@ -15,10 +17,121 @@ use crate::resp::{ RespType };
 use crate::epoll::{
     add_interest, get_epoll_event_read,
     remove_interest, timer_create_event};
-use crate::cmd_builder::{ Cmd, CmdArg, KW_ACK, KW_FULLRESYNC, KW_GETACK, KW_PONG, KW_QUEUED, KW_REPLCONF, KW_REPLICATION };
+use crate::cmd_builder::{
+    Cmd, CmdArg, KW_ACK, KW_FULLRESYNC, KW_GETACK,
+    KW_PONG, KW_QUEUED, KW_REPLCONF, KW_REPLICATION };
 use crate::utils::now;
 use crate::app_state::{AppStates, Configs};
 use crate::{ClientTable};
+
+
+// A B
+
+// Wrapper for score value f64 needed
+// because BTreeMap requires the key to implement Ord
+// while f64 does not implement Ord (due to NaN value), only PartialOrd
+#[derive(PartialEq, Debug)]
+pub struct Score(f64);  // wrapper for f64 used in ZSet
+
+impl Eq for Score {}    // This is no fn trait, for Score(_) == Score(_)
+
+// PartialOrd and Ord must agree, or non-canonical implementations error
+// thus partial_cmp(a, b) must == Some(cmp(a, b))
+impl PartialOrd for Score {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// f64 implemented PartialOrd, then partial_cmp
+impl Ord for Score {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.partial_cmp(&other.0).unwrap()
+    }
+}
+
+// SortedSet neet a separate implementation
+// as both member is unique, and score need to be SortedSet
+#[derive(Debug)]
+pub struct SortedSet<> {
+    members: HashMap<Rc<String>, f64>,      // No need Rc<f64>, not saving any mem
+    scores: BTreeMap<Score, Rc<String>>,
+}
+
+impl SortedSet {
+    pub fn new() -> Self {
+        Self { members: HashMap::new(), scores: BTreeMap::new() }
+    }
+
+    pub fn add(&mut self, score: f64, member: String) -> i64 {
+        // Add or update score of a member
+        // Return the nbr of newly added member
+        let mut new_mem_count = 1;
+        let member_rc = Rc::from(member);
+
+        if self.members.contains_key(&member_rc) {
+            // Remove score
+            let _ = self.scores.remove(&Score(score)); 
+            new_mem_count = 0;
+        };
+
+        // Add new
+        self.members.insert(member_rc.clone(), score);
+        self.scores.insert(Score(score), member_rc);
+        new_mem_count
+    }
+
+    pub fn rank_by_score(&self, member: &Rc<String>) -> Option<i64> {
+        if let Some(score) = self.members.get(member) {
+            let target_score = Score(*score);
+            let rank = self.scores.range(..target_score).count();
+            Some(rank as i64)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_members(&self, start_idx: i64, end_idx: i64) -> Vec<String> {
+        let member_count = self.scores.len() as i64;
+
+        // Handle negative index
+        let start_idx = if start_idx < 0 {
+            (member_count + start_idx).max(0)
+        } else {
+            start_idx
+        };
+
+        let end_idx = if end_idx < 0 {
+            (member_count + end_idx).max(0)
+        } else {
+            end_idx
+        };
+
+        self.scores.iter()
+            .skip(start_idx as usize)
+            .take((end_idx - start_idx + 1) as usize)
+            .map(|(_, member)| (**member).clone())
+            .collect()
+    }
+
+    pub fn get_score(&self, member: &Rc<String>) -> Option<f64> {
+        self.members.get(member).copied()
+    }
+
+    pub fn remove(&mut self, member: &Rc<String>) -> i64 {
+        if self.members.remove(member).is_some() {
+            1
+        } else {
+            0
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+    
+}
+
 
 // Stored value types for CmdHandler
 #[derive(Debug)]
@@ -26,7 +139,7 @@ pub enum StoreValue {
     Str(String),
     List(VecDeque<String>),
     Set(HashSet<String>),
-    ZSet(BTreeMap<String, f64>),
+    ZSet(SortedSet),
     Hash(HashMap<String, String>),
     // timestamp id - (timestamp, order, Vec of String)
     Stream(BTreeMap<(u64, u64), Vec<String>>),
@@ -163,7 +276,7 @@ impl RequestRegistry {
         match &request_entry {
             RequestEntry::List { key, .. } => {
                 self.backlog_list.entry(key.clone())
-                    .or_insert_with(VecDeque::new).push_back(timestamp);
+                    .or_default().push_back(timestamp);
             },
             RequestEntry::Stream { .. } => {
                 self.backlog_stream.insert(timestamp);
@@ -171,7 +284,7 @@ impl RequestRegistry {
             RequestEntry::Wait { client_id, slave_ids, .. } => {
                 self.backlog_wait.insert(*client_id, timestamp);
                 for i in slave_ids {
-                    self.backlog_ack.entry(*i).or_insert_with(Vec::new).push(*client_id); 
+                    self.backlog_ack.entry(*i).or_default().push(*client_id); 
                 }
             }
         }
@@ -204,12 +317,10 @@ impl RequestRegistry {
                 self.backlog_wait.remove(&client_id);
                 for i in slave_ids {
                     self.backlog_ack.entry(*i).and_modify(|v| v.retain(|x| *x != client_id));
-                    match self.backlog_ack.get(i) {
-                        Some(v) => {
-                            if v.is_empty() {self.backlog_ack.remove(i);};
-                        },
-                        None => {},
-                    }
+                    if let Some(v) = self.backlog_ack.get(i) && v.is_empty()
+                    {
+                            self.backlog_ack.remove(i);
+                    };
                 };
                 deadline
             }
@@ -221,20 +332,17 @@ impl RequestRegistry {
     }
 
     fn set_timer_fd(&self) {
-        match self.deadline.first_key_value() {
-            Some((deadline, _)) => {
-                let now = now();
-                let timeout = if *deadline > now {
-                    (deadline - now) as i64
-                } else {
-                    // Schedule to be fired immediately in next loop
-                    // unit ms
-                    1
-                };
-                println!("Set timer for deadline {}, timeout {}", deadline, timeout);
-                timer_create_event(self.timer_fd, timeout);
-            },
-            None => {},
+        if let Some((deadline, _)) = self.deadline.first_key_value() {
+            let now = now();
+            let timeout = if *deadline > now {
+                (deadline - now) as i64
+            } else {
+                // Schedule to be fired immediately in next loop
+                // unit ms
+                1
+            };
+            println!("Set timer for deadline {}, timeout {}", deadline, timeout);
+            timer_create_event(self.timer_fd, timeout);
         }
     }
 
@@ -257,12 +365,12 @@ impl RequestRegistry {
 
     pub fn add_to_txn(&mut self, client_id: u64, cmd: Cmd, buf: Vec<u8>) {
         self.backlog_txn.entry(client_id)
-            .or_insert_with(VecDeque::new).push_back((cmd, buf));
+            .or_default().push_back((cmd, buf));
     }
 
     pub fn watch(&mut self, mut keys: Vec<Rc<str>>, client_id: u64) {
         keys.drain(..).for_each(|k| {
-            self.watchlist.entry(k).or_insert_with(HashMap::new)
+            self.watchlist.entry(k).or_default()
                 .entry(client_id).or_insert(false);
         }) 
     }
@@ -359,16 +467,14 @@ impl CmdHandler {
         serialized: bool) -> Result<CmdOutput, CmdOutput> {
         // Check for subscriber mode and subscriber-allowed cmd
         let is_subscriber = self.is_subscriber(&client_id);
-        if is_subscriber {
-            if !Self::is_cmd_subscriber_allowed(&cmd) {
-                let mut cmd_name = cmd.get_name();
-                cmd_name.make_ascii_lowercase();
-                let msg = format!("ERR Can't execute '{}': \
-                           only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE \
-                           / PING / QUIT / RESET are allowed in this context", cmd_name);
-                let err = CustomError::UnsupportedCmd(msg.to_string());
-                return Err(CmdOutput::Bytes(err.into_error_bytes()));
-            }
+        if is_subscriber && !Self::is_cmd_subscriber_allowed(&cmd) {
+            let mut cmd_name = cmd.get_name();
+            cmd_name.make_ascii_lowercase();
+            let msg = format!("ERR Can't execute '{}': \
+                       only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE \
+                       / PING / QUIT / RESET are allowed in this context", cmd_name);
+            let err = CustomError::UnsupportedCmd(msg.to_string());
+            return Err(CmdOutput::Bytes(err.into_error_bytes()));
         };
 
         // Set dirty first
@@ -431,6 +537,12 @@ impl CmdHandler {
             Cmd::PUNSUBSCRIBE => Ok(None),
             Cmd::QUIT => Ok(None),
             Cmd::PUBLISH { key, message } => self.cmd_publish(key, message),
+            Cmd::ZADD { key, score, member } => self.cmd_zadd(key, score, member),
+            Cmd::ZRANK { key, member } => self.cmd_zrank(key, member),
+            Cmd::ZRANGE { key, start, end } => self.cmd_zrange(key, start, end),
+            Cmd::ZCARD(key) => self.cmd_zcard(key),
+            Cmd::ZSCORE { key, member } => self.cmd_zscore(key, member),
+            Cmd::ZREM { key, member } => self.cmd_zrem(key, member)
             // _ => None
         };
 
@@ -1585,7 +1697,7 @@ impl CmdHandler {
         -> Result<Option<RespType>, CustomError>
     {
         match arg {
-            CmdArg::GETACK(s) => {
+            CmdArg::GetAck(s) => {
                 // Slave receives this after handshake established
                 if s == "*" {
                     // Response REPLCONF ACK <offset>
@@ -1613,7 +1725,7 @@ impl CmdHandler {
             CmdArg::Capa(_) => {
                 Ok(Self::response_ok())
             },
-            CmdArg::ACK(offset) => {
+            CmdArg::Ack(offset) => {
                 // This is when master receive ACK from slave
                 // Make sure that slave sends this only when receive GETACK from master
                 // that way slave was certainly registered in backlog_wait
@@ -1762,7 +1874,7 @@ impl CmdHandler {
         let request_entry = RequestEntry::Wait {
             client_id,
             required_count: count,
-            actual_count: actual_count,
+            actual_count,
             deadline,
             offset_snapshot,
             slave_ids,
@@ -1779,7 +1891,7 @@ impl CmdHandler {
     fn cmd_config(arg: CmdArg) -> Result<Option<RespType>, CustomError> {
         let config = Configs::get();
         match arg {
-            CmdArg::GET(s) => {
+            CmdArg::Get(s) => {
                 if s == "dir" {
                     let path = config.get_rdb_path().unwrap_or(&"".to_string()).to_string();
                     let mut resp_arr = RespType::Array { length: 2, value: None };
@@ -1839,10 +1951,9 @@ impl CmdHandler {
         match self.subscribers.get(&rc) {
             Some(client_rc) => {
                 keys.drain(..).for_each(|k| {
-                    self.channels.entry(k.clone()).or_insert(HashSet::new())
+                    self.channels.entry(k.clone()).or_insert_with(HashSet::new)
                         .insert(client_rc.clone());
-
-                    let count = Rc::strong_count(&client_rc);
+                    let count = Rc::strong_count(client_rc);
                     responses.extend(
                         Self::_get_subscribe_response(&k, count - 1)
                     );
@@ -1851,13 +1962,13 @@ impl CmdHandler {
             None => {
                 self.subscribers.insert(rc.clone());
                 keys.drain(..).for_each(|k| {
-                    self.channels.entry(k.clone()).or_insert(HashSet::new())
-                        .insert(rc.clone());
-
+                    // This count only work if the vec does not include duplicated names
                     let count = Rc::strong_count(&rc);
                     responses.extend(
-                        Self::_get_subscribe_response(&k, count - 2)
+                        Self::_get_subscribe_response(&k, count - 1)
                     );
+                    self.channels.entry(k).or_insert_with(HashSet::new)
+                        .insert(rc.clone());
                 });
             },
         };
@@ -1932,5 +2043,115 @@ impl CmdHandler {
             self.subscribers.remove(&Rc::from(client_id));
         };
         output
+    }
+
+    fn cmd_zadd(&mut self, key: String, score: f64, member: String)
+        -> Result<Option<RespType>, CustomError>
+    {
+        let store_item = self.data.entry(key).or_insert_with(||
+            StoreItem::new(
+                StoreValue::ZSet(SortedSet::new()),
+                None)
+        );
+
+        let count = match &mut store_item.value {
+            StoreValue::ZSet(set) => {
+                set.add(score, member)
+            },
+            _ => return Err(CustomError::UnprocessableError("Wrong type".to_string())),
+        };
+
+        Ok(Some(RespType::Integer(Some(count))))
+    }
+
+    fn cmd_zrank(&self, key: String, member: String)
+        -> Result<Option<RespType>, CustomError>
+    {
+        let Some(store_item) = self.data.get(&key) else {
+            return Ok(Some(RespType::BulkStr { length: 0, value: None }))
+        };
+
+        match &store_item.value {
+            StoreValue::ZSet(set) => {
+                if let Some(rank) = set.rank_by_score(&Rc::from(member)) {
+                    Ok(Some(RespType::Integer(Some(rank))))
+                } else {
+                    Ok(Some(RespType::BulkStr { length: 0, value: None }))
+                }
+            },
+            _ => Err(CustomError::UnprocessableError("Wrong type".to_string())),
+        }
+    }
+
+    fn cmd_zrange(&self, key: String, start: i64, end: i64)
+        -> Result<Option<RespType>, CustomError>
+    {
+        let Some(store_item) = self.data.get(&key) else {
+            return Ok(Some(
+                RespType::Array { length: 0, value: Some(VecDeque::new()) }
+            ))
+        };
+
+        match &store_item.value {
+            StoreValue::ZSet(set) => {
+                let mut members = set.get_members(start, end); 
+                let mut resp_arr = RespType::Array { length: members.len(), value: None };
+                members.drain(..).for_each(|s| {
+                    let resp_member = RespType::BulkStr { length: s.len(), value: Some(s) };
+                    resp_arr.add_item(resp_member);
+                });
+                Ok(Some(resp_arr))
+            },
+            _ => Err(CustomError::UnprocessableError("Wrong type".to_string())),
+        }        
+    }
+
+    fn cmd_zcard(&self, key: String) -> Result<Option<RespType>, CustomError> {
+        let Some(store_item) = self.data.get(&key) else {
+            return Ok(Some(
+                RespType::Array { length: 0, value: Some(VecDeque::new()) }
+            ))
+        };
+
+        match &store_item.value {
+            StoreValue::ZSet(set) => {
+                Ok(Some(RespType::Integer(Some(set.len() as i64))))
+            },
+            _ => Err(CustomError::UnprocessableError("Wrong type".to_string())),
+        } 
+    }
+
+    fn cmd_zscore(&self, key: String, member: String) -> Result<Option<RespType>, CustomError> {
+        let Some(store_item) = self.data.get(&key) else {
+            return Ok(Some(
+                RespType::Array { length: 0, value: Some(VecDeque::new()) }
+            ))
+        };
+
+        match &store_item.value {
+            StoreValue::ZSet(set) => {
+                if let Some(score) = set.get_score(&Rc::from(member)) {
+                    let score_str = score.to_string();
+                    Ok(Some(RespType::BulkStr { length: score_str.len(), value: Some(score_str) }))
+                } else {
+                    Ok(Some(RespType::BulkStr { length: 0, value: None })) 
+                }
+            },
+            _ => Err(CustomError::UnprocessableError("Wrong type".to_string())),
+        }
+    }
+
+    fn cmd_zrem(&mut self, key: String, member: String) -> Result<Option<RespType>, CustomError> {
+         let Some(store_item) = self.data.get_mut(&key) else {
+            return Ok(Some(RespType::Integer(Some(0))))
+        };
+
+        match &mut store_item.value {
+            StoreValue::ZSet(set) => {
+                let count = set.remove(&Rc::from(member));
+                Ok(Some(RespType::Integer(Some(count))))
+            },
+            _ => Err(CustomError::UnprocessableError("Wrong type".to_string())),
+        }  
     }
 }

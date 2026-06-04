@@ -19,6 +19,7 @@ mod replication;
 mod tests;
 mod exceptions;
 mod rdb;
+mod custom_data;
 
 use crate::app_state::{AppStates, Configs, ConfigsBuilder};
 use crate::client::{TcpClient, BUFFER_SIZE};

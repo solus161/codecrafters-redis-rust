@@ -52,7 +52,12 @@ const KW_PSUBSCRIBE: &str = "PSUBSCRIBE";
 const KW_PUNSUBSCRIBE: &str = "PUNSUBSCRIBE";
 const KW_QUIT: &str = "QUIT";
 const KW_PUBLISH: &str = "PUBLISH";
-
+const KW_ZADD: &str = "ZADD";
+const KW_ZRANK: &str = "ZRANK";
+const KW_ZRANGE: &str = "ZRANGE";
+const KW_ZCARD: &str = "ZCARD";
+const KW_ZSCORE: &str = "ZSCORE";
+const KW_ZREM: &str = "ZREM";
 
 #[derive(Debug, PartialEq)]
 pub enum CmdArg {
@@ -61,9 +66,9 @@ pub enum CmdArg {
     PX(Option<u64>), // expire in x miliseconds
     ListeningPort(u16),
     Capa(String),
-    GETACK(String),
-    ACK(i64),
-    GET(String),
+    GetAck(String),
+    Ack(i64),
+    Get(String),
 }
 
 impl CmdArg {
@@ -85,14 +90,14 @@ impl CmdArg {
                 Ok(Self::Capa(value))
             },
             k if k == KW_GETACK => {
-                Ok(Self::GETACK(value))
+                Ok(Self::GetAck(value))
             },
             k if k == KW_ACK => {
                 let x = value.parse::<i64>()?;
-                Ok(Self::ACK(x))
+                Ok(Self::Ack(x))
             },
             k if k == KW_GET => {
-                Ok(Self::GET(value))
+                Ok(Self::Get(value))
             },
             _ => Err(CustomError::InvalidArgument(format!("Invalid arg for {}", &key))),
         }
@@ -137,7 +142,13 @@ pub enum Cmd {
     PSUBSCRIBE,
     PUNSUBSCRIBE,
     QUIT,
-    PUBLISH{ key: String, message: String }
+    PUBLISH{ key: String, message: String },
+    ZADD{ key: String, score: f64, member: String },
+    ZRANK{ key: String, member: String },
+    ZRANGE{ key: String, start: i64, end: i64 },
+    ZCARD(String),
+    ZSCORE{ key: String, member: String },
+    ZREM{ key: String, member: String}
 }
 
 impl Cmd {
@@ -159,7 +170,7 @@ impl Cmd {
 
     pub const fn always_response(&self) -> bool {
         match self {
-            Self::REPLCONF(CmdArg::GETACK(_)) => {
+            Self::REPLCONF(CmdArg::GetAck(_)) => {
                 true
             },
             _ => false
@@ -227,10 +238,10 @@ impl Cmd {
                     None => return Err(CustomError::MissingArgument(msg_exp_value.to_string()))
                 };
                 let opt = CmdArg::set(expire_key, expire_value)?;
-                Ok(Self::SET{ key: key, value: value, opt: Some(opt) })
+                Ok(Self::SET{ key, value, opt: Some(opt) })
             },
             // Have no option
-            None => Ok(Self::SET{ key: key, value: value, opt: None })
+            None => Ok(Self::SET{ key, value, opt: None })
         }
     }
 
@@ -781,7 +792,7 @@ impl Cmd {
         Ok(Self::QUIT)
     }
 
-    fn publish(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+    fn publish(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
         let msg_key = "No channel name provided for PUBLISH";
         let key = values.pop_front()
             .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
@@ -795,6 +806,111 @@ impl Cmd {
             .ok_or(CustomError::MissingArgument(msg_msg.to_string()))?;
 
         Ok(Self::PUBLISH { key, message })
+    }
+
+    fn zadd(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for ZADD";
+        let key = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+
+        let msg_score = "No score provided for ZADD";
+        let score: f64 = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_score.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_score.to_string()))?
+            .parse::<f64>()?;
+
+        let msg_member = "No member provided for ZADD";
+        let member = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?;
+
+        Ok(Cmd::ZADD { key, score, member })
+    }
+
+    fn zrank(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for ZRANK";
+        let key = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+
+        let msg_member = "No member provided for ZRANK";
+        let member = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?;
+
+        Ok(Cmd::ZRANK { key, member }) 
+    }
+
+    fn zrange(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for ZRANGE";
+        let key = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+
+        let msg_start = "No start index provided for ZRANGE";
+        let start = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_start.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_start.to_string()))?
+            .parse::<i64>()?;
+
+        let msg_end = "No end index provided for ZRANGE";
+        let end = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_end.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_end.to_string()))?
+            .parse::<i64>()?;
+
+        Ok(Cmd::ZRANGE { key, start, end })
+    }
+
+    fn zcard(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for ZCARD";
+        let key = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+
+        Ok(Cmd::ZCARD(key))
+    }
+
+    fn zscore(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for ZSCORE";
+        let key = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+
+        let msg_member = "No member provided for ZSCORE";
+        let member = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?;
+
+        Ok(Cmd::ZSCORE { key, member })
+    }
+
+    fn zrem(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for ZREM";
+        let key = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        
+        let msg_member = "No member provided for ZREM";
+        let member = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?;
+
+        Ok(Cmd::ZREM{ key, member })
     }
 
     pub fn from_resp(resp_type: RespType) -> Result<Self, CustomError> {
@@ -852,6 +968,12 @@ impl Cmd {
                                         KW_PUNSUBSCRIBE => Self::punsubscribe(),
                                         KW_QUIT => Self::quit(),
                                         KW_PUBLISH => Self::publish(v),
+                                        KW_ZADD => Self::zadd(v),
+                                        KW_ZRANK => Self::zrank(v),
+                                        KW_ZRANGE => Self::zrange(v),
+                                        KW_ZCARD => Self::zcard(v),
+                                        KW_ZSCORE => Self::zscore(v),
+                                        KW_ZREM => Self::zrem(v),
                                         _ => Err(
                                             CustomError::InvalidArgument("Invalid command".to_string()))
                                     } 
