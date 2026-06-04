@@ -611,19 +611,13 @@ impl RespType {
                 }
             },
             Self::SimpleStr(o) => {
-                match o {
-                    Some(s) => {
-                        write!(&mut output, "{}{}{}", &prefix, s, DELIMITER).unwrap();
-                    },
-                    None => {},
+                if let Some(s) =  o {
+                    write!(&mut output, "{}{}{}", &prefix, s, DELIMITER).unwrap();
                 }
             },
             Self::Integer(o) => {
-                match o {
-                    Some(x) => {
-                        write!(&mut output, "{}{}{}", &prefix, x, DELIMITER).unwrap()
-                    },
-                    None => {},
+                if let Some(x) = o {
+                    write!(&mut output, "{}{}{}", &prefix, x, DELIMITER).unwrap()
                 }
             },
             Self::RDB(Some(v)) => {
@@ -631,18 +625,12 @@ impl RespType {
                 output.extend_from_slice(v);
             },
             Self::Error(o) => {
-                match o {
-                    Some(s) => {
-                        write!(&mut output, "{}{}{}", &prefix, s, DELIMITER).unwrap()
-                    },
-                    None => {},
+                if let Some(s) =  o {
+                    write!(&mut output, "{}{}{}", &prefix, s, DELIMITER).unwrap()
                 }
             },
             Self::Bytes(o) => {
-                match o {
-                    Some(b) => { output.extend(b) },
-                    None => {}
-                }
+                if let Some(b) =  o { output.extend(b) }
             },
             _ => todo!("Serialize not yet implemented")
         };

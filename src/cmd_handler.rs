@@ -55,7 +55,7 @@ impl Ord for Score {
 #[derive(Debug)]
 pub struct SortedSet<> {
     members: HashMap<Rc<String>, f64>,      // No need Rc<f64>, not saving any mem
-    scores: BTreeMap<Score, Rc<String>>,
+    scores: BTreeMap<(Score, Rc<String>), ()>,
 }
 
 impl SortedSet {
@@ -71,24 +71,21 @@ impl SortedSet {
 
         if self.members.contains_key(&member_rc) {
             // Remove score
-            let _ = self.scores.remove(&Score(score)); 
+            let _ = self.scores.remove(&(Score(score), member_rc.clone())); 
             new_mem_count = 0;
         };
 
         // Add new
         self.members.insert(member_rc.clone(), score);
-        self.scores.insert(Score(score), member_rc);
+        self.scores.insert((Score(score), member_rc), ());
         new_mem_count
     }
 
     pub fn rank_by_score(&self, member: &Rc<String>) -> Option<i64> {
-        if let Some(score) = self.members.get(member) {
-            let target_score = Score(*score);
-            let rank = self.scores.range(..target_score).count();
-            Some(rank as i64)
-        } else {
-            None
-        }
+        let score = self.members.get(member)?;
+        let target_score = (Score(*score), member.clone());
+        let rank = self.scores.range(..target_score).count();
+        Some(rank as i64)
     }
 
     pub fn get_members(&self, start_idx: i64, end_idx: i64) -> Vec<String> {
@@ -110,7 +107,7 @@ impl SortedSet {
         self.scores.iter()
             .skip(start_idx as usize)
             .take((end_idx - start_idx + 1) as usize)
-            .map(|(_, member)| (**member).clone())
+            .map(|((_, member_rc), ())| (**member_rc).clone())
             .collect()
     }
 
