@@ -20,6 +20,7 @@ mod tests;
 mod exceptions;
 mod rdb;
 mod custom_data;
+mod geohash;
 
 use crate::app_state::{AppStates, Configs, ConfigsBuilder};
 use crate::client::{TcpClient, BUFFER_SIZE};
