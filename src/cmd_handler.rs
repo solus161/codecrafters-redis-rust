@@ -2287,14 +2287,19 @@ impl CmdHandler {
             members = dist_members.into_iter()
                 .filter(|(d, _)| *d <= radius).map(|(_, m)| m)
                 .collect();
-
-            let mut resp_arr = RespType::Array { length: members.len(), value: None };
-            members.drain(..).for_each(|m| {
-                resp_arr.add_item(
-                    RespType::BulkStr { length: m.len(), value: Some(m) }
-                );
-            });
-            Ok(Some(resp_arr))
+            
+            if !members.is_empty() {
+                let mut resp_arr = RespType::Array { length: members.len(), value: None };
+                members.drain(..).for_each(|m| {
+                    resp_arr.add_item(
+                        RespType::BulkStr { length: m.len(), value: Some(m) }
+                    );
+                });
+                Ok(Some(resp_arr))
+            } else {
+                let resp_arr = RespType::Array { length: members.len(), value: Some(VecDeque::new()) };
+                Ok(Some(resp_arr))
+            }
         } else {
             Ok(None)
         }
