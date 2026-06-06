@@ -1,13 +1,10 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::collections::{HashMap, VecDeque};
-use std::hash::Hash;
 use std::u64;
 use std::ops::Bound::{Excluded, Unbounded};
 use std::rc::Rc;
 
-
-use base64::write;
 use base64::{ Engine, engine::general_purpose::STANDARD };
 
 use crate::exceptions::{
@@ -23,6 +20,7 @@ use crate::cmd_builder::{
 use crate::utils::now;
 use crate::app_state::{AppStates, Configs};
 use crate::{ClientTable};
+use crate::geohash;
 
 
 // A B
@@ -61,6 +59,10 @@ pub struct SortedSet<> {
 impl SortedSet {
     pub fn new() -> Self {
         Self { members: HashMap::new(), scores: BTreeMap::new() }
+    }
+
+    pub fn members(&self) -> &HashMap<Rc<String>, f64> {
+        &self.members
     }
 
     pub fn add(&mut self, score: f64, member: String) -> i64 {
@@ -543,7 +545,11 @@ impl CmdHandler {
             Cmd::ZRANGE { key, start, end } => self.cmd_zrange(key, start, end),
             Cmd::ZCARD(key) => self.cmd_zcard(key),
             Cmd::ZSCORE { key, member } => self.cmd_zscore(key, member),
-            Cmd::ZREM { key, member } => self.cmd_zrem(key, member)
+            Cmd::ZREM { key, member } => self.cmd_zrem(key, member),
+            Cmd::GEOADD { key, long, lat, member } => self.cmd_geoadd(key, long, lat, member),
+            Cmd::GEOPOS { key, members } => self.cmd_geopos(key, members),
+            Cmd::GEODIST { key, members } => self.cmd_geodist(key, members),
+            Cmd::GEOSEARCH { key, from_arg, by_arg } => self.cmd_geosearch(key, from_arg, by_arg),
             // _ => None
         };
 
@@ -2148,7 +2154,7 @@ impl CmdHandler {
     }
 
     fn cmd_zrem(&mut self, key: String, member: String) -> Result<Option<RespType>, CustomError> {
-         let Some(store_item) = self.data.get_mut(&key) else {
+        let Some(store_item) = self.data.get_mut(&key) else {
             return Ok(Some(RespType::Integer(Some(0))))
         };
 
@@ -2159,5 +2165,138 @@ impl CmdHandler {
             },
             _ => Err(CustomError::UnprocessableError("Wrong type".to_string())),
         }  
+    }
+
+    fn cmd_geoadd(&mut self, key: String, long: String, lat: String, member: String)
+        -> Result<Option<RespType>, CustomError>
+    {
+        let store_item = self.data.entry(key).or_insert(
+            StoreItem::new(
+                StoreValue::ZSet(SortedSet::new()),
+                None));
+
+        let long: f64 = long.parse::<f64>()?;
+        let lat: f64 = lat.parse::<f64>()?;
+
+        let score = geohash::encode(long, lat)? as f64;
+
+        let count = match &mut store_item.value {
+            StoreValue::ZSet(set) => {
+                set.add(score, member)
+            },
+            _ => return Err(CustomError::UnprocessableError("Wrong type".to_string())),
+        };
+        
+        Ok(Some(RespType::Integer(Some(count))))
+    }
+
+    fn cmd_geopos(&self, key: String, mut members: Vec<String>) -> Result<Option<RespType>, CustomError> {
+        let Some(store_item) = self.data.get(&key) else {
+            let mut resp_output = RespType::Array { length: members.len(), value: None };
+            (0..members.len()).into_iter().for_each(|_| {
+                resp_output.add_item(RespType::Array { length: 0, value: None })
+            });
+            return Ok(Some(resp_output))
+        };
+
+        if let StoreValue::ZSet(set) = &store_item.value {
+            let mut scores: Vec<Option<f64>> = Vec::new();
+            members.drain(..).for_each(|m| {
+                scores.push(set.get_score(&Rc::from(m)));
+            });
+
+            let mut resp_output = RespType::Array { length: scores.len(), value: None };
+            let _ = scores.drain(..).try_for_each(|o| -> Result<(), CustomError> {
+                if let Some(s) = o {
+                    let (long, lat) =  geohash::decode(s as u64)?;
+                    let long_str = long.to_string();
+                    let lat_str = lat.to_string();
+                    let mut resp_coor = RespType::Array { length: 2, value: None };
+                    let resp_long = RespType::BulkStr { length: long_str.len(), value: Some(long_str) };
+                    let resp_lat = RespType::BulkStr { length: lat_str.len(), value: Some(lat_str) };
+                    resp_coor.add_item(resp_long);
+                    resp_coor.add_item(resp_lat);
+                    resp_output.add_item(resp_coor);
+                } else {
+                    let resp_nil = RespType::Array { length: 0, value: None };
+                    resp_output.add_item(resp_nil);
+                };
+                Ok(())
+            });
+            Ok(Some(resp_output))
+        } else {
+            Err(CustomError::UnprocessableError("Wrong type".to_string()))
+        }
+    }
+
+    fn cmd_geodist(&self, key: String, mut members: Vec<String>)
+        -> Result<Option<RespType>, CustomError>
+    {
+        let Some(store_item) = self.data.get(&key) else {
+            let resp_output = RespType::BulkStr { length: 0, value: None };
+            return Ok(Some(resp_output))
+        };
+
+        if let StoreValue::ZSet(set) = &store_item.value {
+            let mut locations: Vec<(f64, f64)> = Vec::new();
+            let _  = members.drain(..).try_for_each(|s| -> Result<(), CustomError> {
+                let score = set.get_score(&Rc::from(s)).ok_or(
+                    CustomError::UnprocessableError("Location not exists".to_string())
+                )?;
+
+                locations.push(geohash::decode(score as u64)?);
+                Ok(())
+            });
+
+            let distance = geohash::distance(locations)?.to_string();
+            Ok(Some(RespType::BulkStr { length: distance.len(), value: Some(distance) }))
+        } else {
+            Err(CustomError::UnprocessableError("Wrong type".to_string()))
+        }
+    }
+
+    fn cmd_geosearch(&self, key: String, from_arg: CmdArg, by_arg: CmdArg) 
+        -> Result<Option<RespType>, CustomError>
+    {
+        let Some(store_item) = self.data.get(&key) else {
+            let resp_output = RespType::Array { length: 0, value: None };
+            return Ok(Some(resp_output))
+        }; 
+
+        let mut members: Vec<String>;
+        if let StoreValue::ZSet(set) = &store_item.value {
+            let (long0, lat0) = match from_arg {
+                CmdArg::FromLonLat((long, lat)) => (long, lat),
+                _ => return Err(CustomError::UnsupportedCmdStructure("Must be FROMLONLAT".to_string())),
+            };
+            let radius = match by_arg {
+                CmdArg::ByRadius(r) => r,
+                _ => return Err(CustomError::UnsupportedCmdStructure("Must be radius".to_string())),
+            };
+            
+            let mut dist_members: Vec<(f64, String)> = Vec::new();
+            let _ = set.members.iter()
+                .try_for_each(|(k, v)| -> Result<(), CustomError> {
+                    let (long, lat) = geohash::decode(*v as u64)?;
+                    let distance = geohash::distance(
+                        vec![(long0, lat0), (long, lat)]
+                    )?;
+                    dist_members.push((distance, k.to_string()));
+                    Ok(())
+                })?;
+            members = dist_members.into_iter()
+                .filter(|(d, _)| *d <= radius).map(|(_, m)| m)
+                .collect();
+
+            let mut resp_arr = RespType::Array { length: members.len(), value: None };
+            members.drain(..).for_each(|m| {
+                resp_arr.add_item(
+                    RespType::BulkStr { length: m.len(), value: Some(m) }
+                );
+            });
+            Ok(Some(resp_arr))
+        } else {
+            Ok(None)
+        }
     }
 }

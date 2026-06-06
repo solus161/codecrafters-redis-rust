@@ -58,6 +58,12 @@ const KW_ZRANGE: &str = "ZRANGE";
 const KW_ZCARD: &str = "ZCARD";
 const KW_ZSCORE: &str = "ZSCORE";
 const KW_ZREM: &str = "ZREM";
+const KW_GEOADD: &str = "GEOADD";
+const KW_GEOPOS: &str = "GEOPOS";
+const KW_GEODIST: &str = "GEODIST";
+const KW_GEOSEARCH: &str = "GEOSEARCH";
+const KW_FROMLONLAT: &str = "FROMLONLAT";
+const KW_BYRADIUS: &str = "BYRADIUS";
 
 #[derive(Debug, PartialEq)]
 pub enum CmdArg {
@@ -69,6 +75,8 @@ pub enum CmdArg {
     GetAck(String),
     Ack(i64),
     Get(String),
+    FromLonLat((f64, f64)),
+    ByRadius(f64), // unit meter
 }
 
 impl CmdArg {
@@ -148,7 +156,11 @@ pub enum Cmd {
     ZRANGE{ key: String, start: i64, end: i64 },
     ZCARD(String),
     ZSCORE{ key: String, member: String },
-    ZREM{ key: String, member: String}
+    ZREM{ key: String, member: String},
+    GEOADD{ key: String, long: String, lat: String, member: String },
+    GEOPOS{ key: String, members: Vec<String> },
+    GEODIST{ key: String, members: Vec<String> },
+    GEOSEARCH{ key: String, from_arg: CmdArg, by_arg: CmdArg},
 }
 
 impl Cmd {
@@ -913,6 +925,126 @@ impl Cmd {
         Ok(Cmd::ZREM{ key, member })
     }
 
+    fn geoadd(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for GEOADD";
+        let key = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        
+        let msg_long = "No longitude provided for GEOADD";
+        let long = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_long.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_long.to_string()))?
+            .parse::<f64>()?
+            .to_string();
+        
+        let msg_lat = "No latitude provided for GEOADD";
+        let lat = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_lat.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_lat.to_string()))?
+            .parse::<f64>()?
+            .to_string();
+         
+        let msg_member = "No member provided for GEOADD";
+        let member = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?;   
+
+        Ok(Cmd::GEOADD { key, long, lat, member })
+    }
+
+    fn geopos(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for GEOPOS";
+        let key = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+
+        let mut members: Vec<String> = Vec::new();
+        let _ = values.drain(..).try_for_each(|v| -> Result<(), CustomError> {
+            members.push(
+                v.get_str()
+                .ok_or(CustomError::MissingArgument("No member provided".to_string()))?
+            );
+            Ok(())
+        });
+
+        Ok(Cmd::GEOPOS { key, members })
+    }
+
+    fn geodist(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for GEODIST";
+        let key = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        
+        let msg_members = "Need 2 locations for distance calculation";
+        let mut members: Vec<String> = Vec::new();
+        let _ = values.drain(..2).try_for_each(|v| -> Result<(), CustomError> {
+            members.push(
+                v.get_str()
+                    .ok_or(CustomError::MissingArgument(msg_members.to_string()))?
+            );
+            Ok(()) 
+        });
+
+        Ok(Self::GEODIST { key, members })
+    }
+
+    fn geosearch(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_key = "No key provided for GEOSEARCH";
+        let key = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+
+        let msg_from_arg = "No FROM arg provided";
+        let _from_arg_str = values.pop_front() // DEFAULT FROMLONLAT
+            .ok_or(CustomError::MissingArgument(msg_from_arg.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_from_arg.to_string()))?;
+
+        let msg_long_lat = "No long/lat provided";
+        let long = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_long_lat.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_long_lat.to_string()))?
+            .parse::<f64>()?;
+        let lat = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_long_lat.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_long_lat.to_string()))?
+            .parse::<f64>()?;
+        let from_arg = CmdArg::FromLonLat((long, lat));
+        
+        let msg_by_arg = "No BY arg provided";
+        let _by_arg_str = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_by_arg.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_by_arg.to_string()))?;
+        
+        let msg_radius = "No radius provided";
+        let radius: f64 = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_radius.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_radius.to_string()))?
+            .parse::<f64>()?;
+        let _unit = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_radius.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_radius.to_string()))?;
+        let by_arg = CmdArg::ByRadius(radius);
+        
+        // TODO: this is partly implemented, so no need to check for unit
+
+        Ok(Cmd::GEOSEARCH { key, from_arg, by_arg })
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CustomError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -974,6 +1106,10 @@ impl Cmd {
                                         KW_ZCARD => Self::zcard(v),
                                         KW_ZSCORE => Self::zscore(v),
                                         KW_ZREM => Self::zrem(v),
+                                        KW_GEOADD => Self::geoadd(v),
+                                        KW_GEOPOS => Self::geopos(v),
+                                        KW_GEODIST => Self::geodist(v),
+                                        KW_GEOSEARCH => Self::geosearch(v),
                                         _ => Err(
                                             CustomError::InvalidArgument("Invalid command".to_string()))
                                     } 
