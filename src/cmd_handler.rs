@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use base64::{ Engine, engine::general_purpose::STANDARD };
 
+use crate::auth::{Auth, AuthFlags};
 use crate::exceptions::{
     CustomError, ERR_HOST_STATS_NOT_INITIATED, ERR_MASTER_STATS_HOST_NOT_SET,
     ERR_MASTER_STATS_NOT_INITIATED, ERR_MASTER_STATS_PORT_NOT_SET};
@@ -550,6 +551,8 @@ impl CmdHandler {
             Cmd::GEOPOS { key, members } => self.cmd_geopos(key, members),
             Cmd::GEODIST { key, members } => self.cmd_geodist(key, members),
             Cmd::GEOSEARCH { key, from_arg, by_arg } => self.cmd_geosearch(key, from_arg, by_arg),
+            Cmd::ACL_WHOAMI => self.cmd_acl_whoami(client_id),
+            Cmd::ACL_GETUSER(username) => self.cmd_acl_getuser(client_id, username),
             // _ => None
         };
 
@@ -2303,5 +2306,71 @@ impl CmdHandler {
         } else {
             Ok(None)
         }
+    }
+
+    fn cmd_acl_whoami(&self, client_id: u64) -> Result<Option<RespType>, CustomError> {
+        let username = Auth::get().borrow().get_username(&client_id)?.to_string();
+
+        Ok(Some(RespType::BulkStr { length: username.len(), value: Some(username) }))
+    }
+
+    fn cmd_acl_getuser(&self, client_id: u64, username: String) -> Result<Option<RespType>, CustomError> {
+        let auth = Auth::get();
+        let binding = auth.borrow();
+        let stored_username = binding.get_username(&client_id)?.to_string();
+
+        if stored_username != username {
+            return Err(CustomError::WrongUsernamePassword("Wrong username".to_string()))
+        };
+
+        let Some(credential) = binding.get_credential(&username) else {
+            return Err(CustomError::WrongUsernamePassword("Wrong username".to_string()))
+        };
+        
+        // Extract metadata
+        let mut resp_output = RespType::Array { length: 4, value: None };
+        // Flags
+        let kw_flags = "flags";
+        let resp_kw_flags = RespType::BulkStr {
+            length: kw_flags.len(),
+            value: Some(kw_flags.to_string()) };        
+        resp_output.add_item(resp_kw_flags);
+
+        let flags = credential.flags();
+        let resp_flags = if flags.is_empty() {
+            RespType::Array { length: 0, value: Some(VecDeque::new()) }
+        } else {
+            let mut resp_flags = RespType::Array { length: flags.len(), value: None };
+            flags.iter().for_each(|f| {
+                let flag = f.to_string();
+                let resp_flag = RespType::BulkStr { length: flag.len(), value: Some(flag) };
+                resp_flags.add_item(resp_flag);
+            });
+            resp_flags
+        };
+        resp_output.add_item(resp_flags);
+
+        // Password
+        let kw_flags = "passwords";
+        let resp_kw_flags = RespType::BulkStr {
+            length: kw_flags.len(),
+            value: Some(kw_flags.to_string()) };        
+        resp_output.add_item(resp_kw_flags);
+        
+        let passwords = credential.passwords();
+        let resp_passwords = if passwords.is_empty() {
+            RespType::Array { length: 0, value: Some(VecDeque::new()) }
+        } else {
+            let mut resp_passwords = RespType::Array { length: passwords.len(), value: None };
+            passwords.iter().for_each(|&p| {
+                let p = p.to_string();
+                let resp_p = RespType::BulkStr { length: p.len(), value: Some(p) };
+                resp_passwords.add_item(resp_p);
+            });
+            resp_passwords
+        };
+        resp_output.add_item(resp_passwords);
+
+        Ok(Some(resp_output))
     }
 }

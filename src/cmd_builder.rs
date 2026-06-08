@@ -64,6 +64,9 @@ const KW_GEODIST: &str = "GEODIST";
 const KW_GEOSEARCH: &str = "GEOSEARCH";
 const KW_FROMLONLAT: &str = "FROMLONLAT";
 const KW_BYRADIUS: &str = "BYRADIUS";
+const KW_ACL: &str = "ACL";
+const KW_WHOAMI: &str = "WHOAMI";
+const KW_GETUSER: &str = "GETUSER";
 
 #[derive(Debug, PartialEq)]
 pub enum CmdArg {
@@ -77,34 +80,36 @@ pub enum CmdArg {
     Get(String),
     FromLonLat((f64, f64)),
     ByRadius(f64), // unit meter
+    WhoAmI(String),
+    GetUser(String),
 }
 
 impl CmdArg {
     fn set(key: String, value: String) -> Result<Self, CustomError> {
-        match key {
-            k if k == KW_EX => {
+        match key.as_str() {
+            KW_EX => {
                 let x = value.parse::<u64>()?;
                 Ok(Self::EX(Some(x)))
             },
-            k if k == KW_PX => {
+            KW_PX => {
                 let x = value.parse::<u64>()?;
                 Ok(Self::PX(Some(x)))
             },
-            k if k == KW_LISTENING_PORT => {
+            KW_LISTENING_PORT => {
                 let x = value.parse::<u16>()?;
                 Ok(Self::ListeningPort(x))
             },
-            k if k == KW_CAPA => {
+            KW_CAPA => {
                 Ok(Self::Capa(value))
             },
-            k if k == KW_GETACK => {
+            KW_GETACK => {
                 Ok(Self::GetAck(value))
             },
-            k if k == KW_ACK => {
+            KW_ACK => {
                 let x = value.parse::<i64>()?;
                 Ok(Self::Ack(x))
             },
-            k if k == KW_GET => {
+            KW_GET => {
                 Ok(Self::Get(value))
             },
             _ => Err(CustomError::InvalidArgument(format!("Invalid arg for {}", &key))),
@@ -161,6 +166,8 @@ pub enum Cmd {
     GEOPOS{ key: String, members: Vec<String> },
     GEODIST{ key: String, members: Vec<String> },
     GEOSEARCH{ key: String, from_arg: CmdArg, by_arg: CmdArg},
+    ACL_WHOAMI,
+    ACL_GETUSER(String),
 }
 
 impl Cmd {
@@ -1045,6 +1052,30 @@ impl Cmd {
         Ok(Cmd::GEOSEARCH { key, from_arg, by_arg })
     }
 
+    fn acl(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_kw = "No arg provided for ACL";
+        let kw = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_kw.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_kw.to_string()))?;
+
+        match kw.as_str() {
+            KW_WHOAMI => {
+                Ok(Cmd::ACL_WHOAMI)
+            },
+            KW_GETUSER => {
+                let msg = "No username provided";
+                let username = values.pop_front()
+                    .ok_or(CustomError::MissingArgument(msg.to_string()))?
+                    .get_str()
+                    .ok_or(CustomError::MissingArgument(msg.to_string()))?;
+
+                Ok(Cmd::ACL_GETUSER(username))
+            },
+            _ => Err(CustomError::UnsupportedCmdStructure("Unsupported".to_string()))
+        }
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CustomError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -1110,6 +1141,7 @@ impl Cmd {
                                         KW_GEOPOS => Self::geopos(v),
                                         KW_GEODIST => Self::geodist(v),
                                         KW_GEOSEARCH => Self::geosearch(v),
+                                        KW_ACL => Self::acl(v),
                                         _ => Err(
                                             CustomError::InvalidArgument("Invalid command".to_string()))
                                     } 

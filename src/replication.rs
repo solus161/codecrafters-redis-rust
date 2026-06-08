@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use std::collections::HashSet;
 
+
 pub struct ClientTable {
     // clients: HashMap<u64, TcpClient>,
     pub master: Option<u64>,

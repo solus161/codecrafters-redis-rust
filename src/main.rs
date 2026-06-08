@@ -21,16 +21,18 @@ mod exceptions;
 mod rdb;
 mod custom_data;
 mod geohash;
+mod auth;
 
 use crate::app_state::{AppStates, Configs, ConfigsBuilder};
 use crate::client::{TcpClient, BUFFER_SIZE};
 use crate::epoll::{timer_create_fd};
 use crate::exceptions::{
-    ERR_CREATING_EPOLL, ERR_HOST_STATS_NOT_INITIATED, 
+    ERR_CREATING_EPOLL, ERR_HOST_STATS_NOT_INITIATED,
     ERR_MASTER_STATS_HOST_NOT_SET, ERR_MASTER_STATS_PORT_NOT_SET};
 use crate::cmd_handler::CmdHandler;
 use crate::rdb::Rdb;
 use crate::replication::ClientTable;
+use crate::auth::{Auth};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parsing args for port
@@ -40,9 +42,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Parsing args for configs
     ConfigsBuilder::new().with_parse_config(&args).build();
-    
-    // Fd for master, replica #[cfg(test)]
-    // let mut master: Option<TcpStream> = None;
 
     // Fd for listener 
     let host_stats = app_state.get_host_stats().expect(ERR_HOST_STATS_NOT_INITIATED);
@@ -59,7 +58,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fd for timer
     let timer_fd = timer_create_fd();
 
-    let cmd_handler = Rc::new(RefCell::new(CmdHandler::new(timer_fd)));
+    let cmd_handler = Rc::new(
+        RefCell::new(CmdHandler::new(timer_fd))
+        );
     
     // Load RDB if any
     if let (Some(path), Some(filename)) = Configs::get().get_rdb_filepath() {
@@ -88,6 +89,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         epoll::add_interest(
             epoll_fd, master.as_raw_fd(), 
             epoll::get_epoll_event_read(master_fd))?;
+
+        // Assign a default credential
+        Auth::get().borrow_mut().authenticate(&master_fd, None, None)
+            .expect("Error assigning default credential");
 
         // Put master to the client table
         let mut client_master = TcpClient::new(
@@ -152,8 +157,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 epoll_fd,
                                 stream_key,
                                 epoll::get_epoll_event_read(stream_key as u64))?;
+
+                            // Assign default credential
+                            let client_id = stream_key as u64;
+                            Auth::get().borrow_mut().authenticate(&client_id, None, None)
+                                .expect("Error assigning default credential");
+
+                            // Add to table holding tcp client
                             clients.insert(
-                                stream_key as u64, 
+                                client_id, 
                                 TcpClient::new(
                                     stream_key as u64,
                                     epoll_fd,
@@ -218,6 +230,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if disconnected {
                             let _ = epoll::remove_interest(epoll_fd, client.stream.as_raw_fd());
                             client_table_rc.borrow_mut().remove_client(&key);
+                            clients.remove(&key);
+                            Auth::get().borrow_mut().remove_auth(&key);
                         };
                     };
                 },
@@ -243,4 +257,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
     }
 }
-

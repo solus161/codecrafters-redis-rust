@@ -1,9 +1,11 @@
+use std::cell::RefCell;
 use std::fmt::Display;
 use std::fs;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{OnceLock};
 
-use crate::exceptions::{ERR_RDB_CREATE};
+use crate::exceptions::{ CustomError, ERR_RDB_CREATE };
+use crate::Auth;
 
 const RDB_FILE: &str = "redis-data";
 
@@ -233,7 +235,10 @@ impl AppStates {
         // After this, master start counting for bytes 
         host_resp.start_bytes_count();
         
-        let _ = APP_STATES.set(Self{ host_stats: Some(host_resp), master_stats: master_repl});
+        let _ = APP_STATES.set(Self{
+            host_stats: Some(host_resp),
+            master_stats: master_repl,
+        });
     }
 
     pub fn get() -> &'static AppStates {

@@ -12,6 +12,7 @@ pub const ERR_MASTER_STATS_PORT_NOT_SET: &str = "Master's port is not set";
 pub const ERR_CREATING_EPOLL: &str = "Error creating epoll queue";
 pub const ERR_WATCH_IN_MULTI: &str = "ERR WATCH inside MULTI is not allowed";
 
+#[derive(Debug)]
 pub enum CustomError {
     PathNotExists(String),
     InvalidArgument(String),
@@ -24,6 +25,7 @@ pub enum CustomError {
     InternalError(String),
     FileReadingError,
     RDBParsingError,
+    WrongUsernamePassword(String),
 }
 
 impl CustomError {
@@ -37,7 +39,8 @@ impl CustomError {
             Self::UnsupportedCmdStructure(s) |
             Self::UnsupportedCmd(s) |
             Self::UnprocessableError(s) |
-            Self::InternalError(s) => {
+            Self::InternalError(s) |
+            Self::WrongUsernamePassword(s)=> {
                 s
             },
             Self::FileReadingError => "Error reading file".into(),
