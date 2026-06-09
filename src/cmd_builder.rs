@@ -68,6 +68,7 @@ const KW_ACL: &str = "ACL";
 const KW_WHOAMI: &str = "WHOAMI";
 const KW_GETUSER: &str = "GETUSER";
 const KW_SETUSER: &str = "SETUSER";
+const KW_AUTH: &str = "AUTH";
 
 #[derive(Debug, PartialEq)]
 pub enum AclRules {
@@ -221,6 +222,7 @@ pub enum Cmd {
     GEODIST{ key: String, members: Vec<String> },
     GEOSEARCH{ key: String, from_arg: CmdArg, by_arg: CmdArg},
     Acl(CmdArg),
+    Auth{ username: String, password: String}
 }
 
 impl Cmd {
@@ -235,6 +237,10 @@ impl Cmd {
             Self::LPOP { .. } | Self::BLPOP { .. } | Self::INCR(_) | 
             Self::XADD { .. } 
         )
+    }
+
+    pub const fn is_auth_cmd(&self) -> bool {
+        matches!(self, Self::Auth { .. })
     }
 
     pub const fn always_response(&self) -> bool {
@@ -1109,44 +1115,29 @@ impl Cmd {
             .ok_or(CustomError::MissingArgument(msg_kw.to_string()))?;
 
         let mut kw_values: VecDeque<String> = VecDeque::new();
-        values.drain(..).try_for_each(|t| -> Result<(), CustomError> {
+        let _ = values.drain(..).try_for_each(|t| -> Result<(), CustomError> {
             kw_values.push_back(t.get_str().ok_or(CustomError::Dummy)?);
             Ok(())
         });
 
         let opt = CmdArg::set(kw, kw_values)?;
         Ok(Self::Acl(opt)) 
+    }
 
+    fn auth(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+        let msg_username = "Username not provided";
+        let username = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_username.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_username.to_string()))?;
 
-        // match kw.as_str() {
-        //     KW_WHOAMI => {
-        //         Ok(Cmd::AclWhoAmI)
-        //     },
-        //     KW_GETUSER => {
-        //         let msg = "No username provided";
-        //         let username = values.pop_front()
-        //             .ok_or(CustomError::MissingArgument(msg.to_string()))?
-        //             .get_str()
-        //             .ok_or(CustomError::MissingArgument(msg.to_string()))?;
-        //
-        //         Ok(Cmd::AclGetUser(username))
-        //     },
-        //     KW_SETUSER => {
-        //         let msg_username = "No username provided";
-        //         let username = values.pop_front()
-        //             .ok_or(CustomError::MissingArgument(msg.to_string()))?
-        //             .get_str()
-        //             .ok_or(CustomError::MissingArgument(msg.to_string()))?;
-        //
-        //         let msg_rules = "No rule provided";
-        //         let mut rules: Vec<String> = Vec::new();
-        //         values.drain(..).try_for_each(|t| -> Result<(), CustomError> {
-        //             rules.push(value);
-        //         })
-        //
-        //     }
-        //     _ => Err(CustomError::UnsupportedCmdStructure("Unsupported".to_string()))
-        // }
+        let msg_password = "Password not provided";
+        let password = values.pop_front()
+            .ok_or(CustomError::MissingArgument(msg_password.to_string()))?
+            .get_str()
+            .ok_or(CustomError::MissingArgument(msg_password.to_string()))?;
+
+        Ok(Self::Auth { username, password })
     }
 
     pub fn from_resp(resp_type: RespType) -> Result<Self, CustomError> {
@@ -1215,6 +1206,7 @@ impl Cmd {
                                         KW_GEODIST => Self::geodist(v),
                                         KW_GEOSEARCH => Self::geosearch(v),
                                         KW_ACL => Self::acl(v),
+                                        KW_AUTH => Self::auth(v),
                                         _ => Err(
                                             CustomError::InvalidArgument("Invalid command".to_string()))
                                     } 

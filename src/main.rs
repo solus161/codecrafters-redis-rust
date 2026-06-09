@@ -159,6 +159,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 epoll::get_epoll_event_read(stream_key as u64))?;
 
                             // Assign default credential
+                            // this will not response anything
+                            // if the default credential requires pass
+                            // TODO
                             let client_id = stream_key as u64;
                             Auth::get().borrow_mut().authenticate(&client_id, None, None)
                                 .expect("Error assigning default credential");
@@ -191,7 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cmd_handler.borrow_mut().callback_deadline_expire();
                 },
                 
-                // St else, may be current client
+                // St else, may be current client sending st
                 key => {
                     let client_table_rc = ClientTable::get();
                     if let Some(client) = clients.get_mut(&key) {

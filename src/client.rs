@@ -4,6 +4,7 @@ use std::io::{ Read, Write };
 use std::net::TcpStream;
 use std::rc::Rc;
 
+use crate::auth::Auth;
 use crate::exceptions::{CustomError, ERR_HOST_STATS_NOT_INITIATED, ERR_MASTER_STATS_PORT_NOT_SET};
 use crate::{ AppStates };
 use crate::cmd_handler::CmdHandler; 
@@ -115,6 +116,14 @@ impl TcpClient {
                     match cmd {
                         Ok(c) => {
                             // println!("{:?}", &c);
+                            // Checking auth here
+                            if !c.is_auth_cmd() && !Auth::get().borrow().check_auth(&self.client_fd)  {
+                                let msg = "NOAUTH Authentication required.";
+                                let resp_err = RespType::Error(Some(msg.to_string()));
+                                self.write_all(&resp_err.serialize())?;
+                                continue; 
+                            };
+
                             match self.repl_state.status {
                                 Some(ReplStatus::Master) => {
                                     response = self.handshake_to_master(c, buf, self.client_fd, self.epoll_fd);

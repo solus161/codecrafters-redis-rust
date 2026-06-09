@@ -48,23 +48,29 @@ impl Credential {
     pub fn passwords(&self) -> Vec<&str> {
         self.passwords.iter().map(|p| p.as_str()).collect()
     }
-    
-    pub fn set_password(&mut self, password: &str) {
+
+    fn hash_password(password: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(password.as_bytes());
-        let encoded = hex::encode(hasher.finalize());
-        self.passwords.insert(encoded);
-
+        hex::encode(hasher.finalize())
+    }
+    
+    pub fn set_password(&mut self, password: &str) {
+        self.passwords.insert(Self::hash_password(password));
         // Remove nopass flag
         self.flags.remove(&AuthFlags::NoPass);
     }
 
     pub fn check_password(&self, password: &str) -> bool {
-        self.passwords.contains(password)
+        self.passwords.contains(&Self::hash_password(password))
     }
 
     pub fn add_flag(&mut self, flag: AuthFlags) -> bool {
         self.flags.insert(flag)
+    }
+
+    pub fn has_nopass(&self) -> bool {
+        self.flags.contains(&AuthFlags::NoPass)
     }
 }
 
@@ -107,6 +113,7 @@ impl Auth {
                         let _ = self.clients.insert(*client_id, username_rc);
                         Ok(())
                     } else {
+                        println!("Wrong pass");
                         Err(err)
                     }
                 } else {
@@ -117,10 +124,19 @@ impl Auth {
                 Err(err)
             },
             (None, None) => {
-                // Assign default credential
-                let username_rc = Rc::from("default");
-                let _ = self.clients.insert(*client_id, username_rc);
-                Ok(())
+                // Assign default credential if nopass flag
+                let default_credential = self.get_credential(&"default")
+                    .ok_or(CustomError::InternalError("No default user".to_string()))?;
+
+                if default_credential.has_nopass() {
+                    let username_rc = Rc::from("default");
+                    let _ = self.clients.insert(*client_id, username_rc);
+                    Ok(())
+                } else {
+                    // This is run whenever a client connect
+                    // so no need for error at that moment
+                    Ok(())
+                }
             }
         }
     }
@@ -141,6 +157,10 @@ impl Auth {
 
     pub fn get_credential_mut(&mut self, username: &str) -> Option<&mut Credential> {
         self.credentials.get_mut(&Rc::from(username))
+    }
+
+    pub fn check_auth(&self, client_id: &u64) -> bool {
+        self.clients.contains_key(client_id)
     }
 }
 

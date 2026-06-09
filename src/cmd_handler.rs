@@ -551,6 +551,7 @@ impl CmdHandler {
             Cmd::GEODIST { key, members } => self.cmd_geodist(key, members),
             Cmd::GEOSEARCH { key, from_arg, by_arg } => self.cmd_geosearch(key, from_arg, by_arg),
             Cmd::Acl(opt) => self.cmd_acl(opt, client_id),
+            Cmd::Auth { username, password } => self.cmd_auth(username, password, client_id)
             // _ => None
         };
 
@@ -2381,7 +2382,9 @@ impl CmdHandler {
         Ok(Some(resp_output))
     }
 
-    fn cmd_acl_setuser(&mut self, username: String, mut rules: Vec<AclRules>) -> Result<Option<RespType>, CustomError> {
+    fn cmd_acl_setuser(&mut self, username: String, mut rules: Vec<AclRules>)
+        -> Result<Option<RespType>, CustomError>
+    {
         let auth = Auth::get();
         let mut binding = auth.borrow_mut();
         let credential = binding.get_credential_mut(&username)
@@ -2402,5 +2405,16 @@ impl CmdHandler {
             }
         });
         Ok(Self::response_ok())
+    }
+
+    fn cmd_auth(&mut self, username: String, password: String, client_id: u64)
+        -> Result<Option<RespType>, CustomError>
+    {
+        let msg = "WRONGPASS invalid username-password pair or user is disabled.";
+        Auth::get().borrow_mut()
+            .authenticate(&client_id, Some(&username), Some(&password))
+            .map_or_else(
+                |_e| Err(CustomError::WrongUsernamePassword(msg.to_string())),
+                |_| Ok(Self::response_ok()))
     }
 }
