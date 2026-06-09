@@ -2381,26 +2381,22 @@ impl CmdHandler {
         Ok(Some(resp_output))
     }
 
-    fn cmd_acl_setuser(&mut self, username: String, mut rules: Vec<AclRules>) -> Result<Option<RespType>, CustomError> {
+    fn cmd_acl_setuser(&mut self, username: String, rules: Vec<AclRules>) -> Result<Option<RespType>, CustomError> {
         let auth = Auth::get();
-        let mut binding = auth.borrow_mut();
-        let credential = binding.get_credential_mut(&username)
+        let credential = auth.borrow_mut().get_credential(&username)
             .ok_or(CustomError::WrongUsernamePassword("Wrong username".to_string()))?;
         
-        let _ = rules.drain(..).try_for_each(|r| -> Result<(), CustomError> {
+        rules.drain(..).for_each(|r| {
             match r {
                 AclRules::NoPass => {
                     credential.add_flag(AuthFlags::NoPass)
-                        .then(|| {})
-                        .ok_or(CustomError::InternalError("Error setting flag".to_string()))?;
-                    Ok(())
+                        .then(|| b)
+                        .ok_or(CustomError::InternalError("Error setting flag".to_string()));
                 },
                 AclRules::AddPassword(s) => {
-                    credential.set_password(&s); 
-                    Ok(())
+                    
                 }
             }
         });
-        Ok(Self::response_ok())
     }
 }

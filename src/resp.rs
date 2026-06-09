@@ -632,6 +632,9 @@ impl RespType {
             Self::Bytes(o) => {
                 if let Some(b) =  o { output.extend(b) }
             },
+            Self::NullBulkStr => {
+                write!(&mut output, "$-1{}", DELIMITER).unwrap()
+            },
             _ => todo!("Serialize not yet implemented")
         };
         output

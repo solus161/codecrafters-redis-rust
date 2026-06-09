@@ -1,13 +1,9 @@
-use std::cell::RefCell;
 use std::fmt::Display;
 use std::fs;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{OnceLock};
 
-use crate::exceptions::{ CustomError, ERR_RDB_CREATE };
-use crate::Auth;
-
-const RDB_FILE: &str = "redis-data";
+use crate::exceptions::{ ERR_RDB_CREATE };
 
 pub struct AtomicOffset(AtomicI64);
 
@@ -83,24 +79,6 @@ impl ConfigsBuilder {
         Self {
             configs: Configs::new()
         }
-    }
-
-    pub fn with_rdb_path(mut self, path: &str) -> Self {
-        // TODO: This need to be custom error, not Box dyn
-        
-        // Check path exists first
-        match fs::exists(path) {
-            Ok(true) => {
-                self.configs.set_rdb_path(path);
-            },
-            Ok(false) => {
-                panic!("Path not exists: {}", path)
-            },
-            Err(e) => {
-                panic!("{}: {}", &ERR_RDB_CREATE, e.to_string())
-            }
-        };
-        self
     }
 
     pub fn with_parse_config(mut self, args: &Vec<String>) -> Self {

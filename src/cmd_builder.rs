@@ -1,4 +1,4 @@
-use std::collections::{VecDeque};
+use std::collections::{ VecDeque };
 use std::u64;
 
 use crate::exceptions::CustomError;
@@ -67,6 +67,31 @@ const KW_BYRADIUS: &str = "BYRADIUS";
 const KW_ACL: &str = "ACL";
 const KW_WHOAMI: &str = "WHOAMI";
 const KW_GETUSER: &str = "GETUSER";
+const KW_SETUSER: &str = "SETUSER";
+
+#[derive(Debug, PartialEq)]
+pub enum AclRules {
+    AddPassword(String),
+    NoPass
+}
+
+impl AclRules {
+    pub fn set(mut values: VecDeque<String>) -> Result<Self, CustomError> {
+        let first = values.pop_front()
+            .ok_or(CustomError::MissingArgument("No rule provided".to_string()))?;
+
+        // 2 rules at the moments
+        match first.as_str() {
+            s if s.chars().nth(0) == Some('>') => {
+                Ok(Self::AddPassword(s[1..].to_string()))
+            },
+            "nopass" => {
+                Ok(Self::NoPass)
+            },
+            _ => Err(CustomError::UnsupportedCmd("Not supported".to_string()))
+        }
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub enum CmdArg {
@@ -80,38 +105,67 @@ pub enum CmdArg {
     Get(String),
     FromLonLat((f64, f64)),
     ByRadius(f64), // unit meter
-    WhoAmI(String),
+    WhoAmI,
     GetUser(String),
+    SetUser{ key: String, rules: Vec<AclRules>},
+    
 }
 
 impl CmdArg {
-    fn set(key: String, value: String) -> Result<Self, CustomError> {
+    fn set(key: String, mut values: VecDeque<String>) -> Result<Self, CustomError> {
         match key.as_str() {
             KW_EX => {
-                let x = value.parse::<u64>()?;
+                let x = values.pop_front()
+                    .ok_or(CustomError::Dummy)?.parse::<u64>()?;
                 Ok(Self::EX(Some(x)))
             },
             KW_PX => {
-                let x = value.parse::<u64>()?;
+                let x = values.pop_front()
+                    .ok_or(CustomError::Dummy)?.parse::<u64>()?;
                 Ok(Self::PX(Some(x)))
             },
             KW_LISTENING_PORT => {
-                let x = value.parse::<u16>()?;
+                let x = values.pop_front()
+                    .ok_or(CustomError::Dummy)?.parse::<u16>()?;
                 Ok(Self::ListeningPort(x))
             },
             KW_CAPA => {
-                Ok(Self::Capa(value))
+                let s = values.pop_front()
+                    .ok_or(CustomError::Dummy)?;
+                Ok(Self::Capa(s))
             },
             KW_GETACK => {
-                Ok(Self::GetAck(value))
+                let s = values.pop_front()
+                    .ok_or(CustomError::Dummy)?;
+                Ok(Self::GetAck(s))
             },
             KW_ACK => {
-                let x = value.parse::<i64>()?;
+                let x = values.pop_front()
+                    .ok_or(CustomError::Dummy)?.parse::<i64>()?;
                 Ok(Self::Ack(x))
             },
             KW_GET => {
-                Ok(Self::Get(value))
+                let s = values.pop_front()
+                    .ok_or(CustomError::Dummy)?;
+                Ok(Self::Get(s))
             },
+            KW_WHOAMI => {
+                Ok(Self::WhoAmI)
+            },
+            KW_GETUSER => {
+                let username = values.pop_front()
+                    .ok_or(CustomError::Dummy)?;
+                Ok(Self::GetUser(username))
+            },
+            KW_SETUSER => {
+                let msg_username = "No username provided";
+                let username = values.pop_front()
+                    .ok_or(CustomError::MissingArgument(msg_username.to_string()))?;
+
+                // Parsing rules
+                let rules = AclRules::set(values)?;
+                Ok(Self::SetUser{ key: username, rules: vec![rules] })
+            }
             _ => Err(CustomError::InvalidArgument(format!("Invalid arg for {}", &key))),
         }
     }
@@ -166,8 +220,7 @@ pub enum Cmd {
     GEOPOS{ key: String, members: Vec<String> },
     GEODIST{ key: String, members: Vec<String> },
     GEOSEARCH{ key: String, from_arg: CmdArg, by_arg: CmdArg},
-    ACL_WHOAMI,
-    ACL_GETUSER(String),
+    Acl(CmdArg),
 }
 
 impl Cmd {
@@ -177,32 +230,23 @@ impl Cmd {
     }
 
     pub const fn to_be_broadcast(&self) -> bool {
-        match self {
+        matches!(self,
             Self::SET { .. } | Self::LPUSH { .. } | Self::RPUSH { .. } |
             Self::LPOP { .. } | Self::BLPOP { .. } | Self::INCR(_) | 
-            Self::XADD { .. } => {
-                true 
-            },
-            _ => {false}
-        }
+            Self::XADD { .. } 
+        )
     }
 
     pub const fn always_response(&self) -> bool {
-        match self {
-            Self::REPLCONF(CmdArg::GetAck(_)) => {
-                true
-            },
-            _ => false
-        }
+        matches!(self,
+            Self::REPLCONF(CmdArg::GetAck(_))
+        )
     }
 
     pub const fn is_flag_list(&self) -> bool {
-        match self {
-            Self::LPUSH { .. } | Self::RPUSH { .. } => {
-                true
-            },
-            _ => false
-        }
+        matches!(self,
+            Self::LPUSH { .. } | Self::RPUSH { .. }
+        )
     }
 
     pub fn is_flag_stream(&self) -> bool {
@@ -224,7 +268,7 @@ impl Cmd {
             .ok_or(CustomError::MissingArgument(msg.to_string()))?
             .get_str()
             .ok_or(CustomError::MissingArgument(msg.to_string()))?;
-        return Ok(Self::ECHO(s));
+        Ok(Self::ECHO(s))
     }
     
     fn set(mut values: VecDeque<RespType> ) -> Result<Self, CustomError> {
@@ -248,15 +292,20 @@ impl Cmd {
             Some(o) => {
                 let expire_key: String = o.get_str()
                     .ok_or(CustomError::MissingArgument(msg_exp_key.to_string()))?;        
-                let expire_value: String = match values.pop_front() {
-                    Some(o) => {
-                        // TODO: handle conversion error
-                        o.get_str()
-                            .ok_or(CustomError::MissingArgument(msg_exp_value.to_string()))? 
-                    },
-                    None => return Err(CustomError::MissingArgument(msg_exp_value.to_string()))
-                };
-                let opt = CmdArg::set(expire_key, expire_value)?;
+                let expire_value: String = values.pop_front()
+                    .ok_or(CustomError::MissingArgument(msg_exp_value.to_string()))?
+                    .get_str()
+                    .ok_or(CustomError::MissingArgument(msg_exp_value.to_string()))?;
+                    
+                // let expire_value: String = match values.pop_front() {
+                //     Some(o) => {
+                //         // TODO: handle conversion error
+                //         o.get_str()
+                //             .ok_or(CustomError::MissingArgument(msg_exp_value.to_string()))? 
+                //     },
+                //     None => return Err(CustomError::MissingArgument(msg_exp_value.to_string()))
+                // };
+                let opt = CmdArg::set(expire_key, VecDeque::from([expire_value]))?;
                 Ok(Self::SET{ key, value, opt: Some(opt) })
             },
             // Have no option
@@ -683,7 +732,7 @@ impl Cmd {
            .ok_or(CustomError::MissingArgument(msg_value.to_string()))?
            .get_str()
            .ok_or(CustomError::MissingArgument(msg_value.to_string()))?;
-        let opt = CmdArg::set(arg, value)?;
+        let opt = CmdArg::set(arg, VecDeque::from([value]))?;
         Ok(Self::REPLCONF(opt))
     }
 
@@ -763,7 +812,7 @@ impl Cmd {
             .get_str()
             .ok_or(CustomError::MissingArgument(msg_value.to_string()))?;
 
-        let opt = CmdArg::set(arg, value)?;
+        let opt = CmdArg::set(arg, VecDeque::from([value]))?;
         Ok(Cmd::CONFIG(opt))
     }
 
@@ -1059,21 +1108,45 @@ impl Cmd {
             .get_str()
             .ok_or(CustomError::MissingArgument(msg_kw.to_string()))?;
 
-        match kw.as_str() {
-            KW_WHOAMI => {
-                Ok(Cmd::ACL_WHOAMI)
-            },
-            KW_GETUSER => {
-                let msg = "No username provided";
-                let username = values.pop_front()
-                    .ok_or(CustomError::MissingArgument(msg.to_string()))?
-                    .get_str()
-                    .ok_or(CustomError::MissingArgument(msg.to_string()))?;
+        let mut kw_values: VecDeque<String> = VecDeque::new();
+        values.drain(..).try_for_each(|t| -> Result<(), CustomError> {
+            kw_values.push_back(t.get_str().ok_or(CustomError::Dummy)?);
+            Ok(())
+        });
 
-                Ok(Cmd::ACL_GETUSER(username))
-            },
-            _ => Err(CustomError::UnsupportedCmdStructure("Unsupported".to_string()))
-        }
+        let opt = CmdArg::set(kw, kw_values)?;
+        Ok(Self::Acl(opt)) 
+
+
+        // match kw.as_str() {
+        //     KW_WHOAMI => {
+        //         Ok(Cmd::AclWhoAmI)
+        //     },
+        //     KW_GETUSER => {
+        //         let msg = "No username provided";
+        //         let username = values.pop_front()
+        //             .ok_or(CustomError::MissingArgument(msg.to_string()))?
+        //             .get_str()
+        //             .ok_or(CustomError::MissingArgument(msg.to_string()))?;
+        //
+        //         Ok(Cmd::AclGetUser(username))
+        //     },
+        //     KW_SETUSER => {
+        //         let msg_username = "No username provided";
+        //         let username = values.pop_front()
+        //             .ok_or(CustomError::MissingArgument(msg.to_string()))?
+        //             .get_str()
+        //             .ok_or(CustomError::MissingArgument(msg.to_string()))?;
+        //
+        //         let msg_rules = "No rule provided";
+        //         let mut rules: Vec<String> = Vec::new();
+        //         values.drain(..).try_for_each(|t| -> Result<(), CustomError> {
+        //             rules.push(value);
+        //         })
+        //
+        //     }
+        //     _ => Err(CustomError::UnsupportedCmdStructure("Unsupported".to_string()))
+        // }
     }
 
     pub fn from_resp(resp_type: RespType) -> Result<Self, CustomError> {

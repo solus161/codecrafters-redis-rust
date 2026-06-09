@@ -26,11 +26,12 @@ pub enum CustomError {
     FileReadingError,
     RDBParsingError,
     WrongUsernamePassword(String),
+    Dummy
 }
 
 impl CustomError {
     pub fn into_resp(self) -> RespType {
-        let msg = match self {
+        match self {
             Self::PathNotExists(s) |
             Self::InvalidArgument(s) |
             Self::MissingArgument(s) |
@@ -41,12 +42,12 @@ impl CustomError {
             Self::UnprocessableError(s) |
             Self::InternalError(s) |
             Self::WrongUsernamePassword(s)=> {
-                s
+                RespType::Error(Some(s))
             },
-            Self::FileReadingError => "Error reading file".into(),
-            Self::RDBParsingError => "Error parsing RDB file".into(), 
-        };
-        RespType::Error(Some(msg)) 
+            Self::FileReadingError | // Not yet implemented
+            Self::RDBParsingError  |
+            Self::Dummy => RespType::NullBulkStr // Just a placeholder
+        }
     }
 
     pub fn into_error_bytes(self) -> Vec<u8> {

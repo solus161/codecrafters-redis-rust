@@ -54,10 +54,17 @@ impl Credential {
         hasher.update(password.as_bytes());
         let encoded = hex::encode(hasher.finalize());
         self.passwords.insert(encoded);
+
+        // Remove nopass flag
+        self.flags.remove(&AuthFlags::NoPass);
     }
 
     pub fn check_password(&self, password: &str) -> bool {
         self.passwords.contains(password)
+    }
+
+    pub fn add_flag(&mut self, flag: AuthFlags) -> bool {
+        self.flags.insert(flag)
     }
 }
 
@@ -130,6 +137,10 @@ impl Auth {
 
     pub fn get_credential(&self, username: &str) -> Option<&Credential> {
         self.credentials.get(&Rc::from(username))
+    }
+
+    pub fn get_credential_mut(&mut self, username: &str) -> Option<&mut Credential> {
+        self.credentials.get_mut(&Rc::from(username))
     }
 }
 

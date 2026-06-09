@@ -7,7 +7,7 @@ use crate::cmd_handler::{StoreItem, StoreValue};
 use crate::exceptions::CustomError;
 
 pub struct Rdb {
-    path: String,
+    _path: String,
     buf: BufReader<File>
 }
 
@@ -16,7 +16,7 @@ impl Rdb {
         // Checking for existing path must be done by Configs
         if let Ok(file) = File::open(&path) {
             let buf = BufReader::new(file);
-            Some(Self { path, buf })
+            Some(Self { _path: path, buf })
         } else {
             None
         }
@@ -38,15 +38,15 @@ impl Rdb {
             self.buf.read_exact(&mut opcode).expect(msg);
             match opcode[0] {
                 0xFA => {
-                    let key = self.parse_string()?;
-                    let value = self.parse_string()?;
+                    let _key = self.parse_string()?;
+                    let _value = self.parse_string()?;
                 },
                 0xFE => {
-                    let size = self.parse_length()?;
+                    let _size = self.parse_length()?;
                 },
                 0xFB => {
-                    let hash_size = self.parse_length()?;
-                    let hash_size_exp = self.parse_length()?;
+                    let _hash_size = self.parse_length()?;
+                    let _hash_size_exp = self.parse_length()?;
                 },
                 0xFC => {
                     let exp_ms = self.parse_exp_ms()?;
