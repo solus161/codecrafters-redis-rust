@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use base64::{ Engine, engine::general_purpose::STANDARD };
 
+use crate::aof::Aof;
 use crate::auth::{Auth, AuthFlags};
 use crate::exceptions::{
     CustomError, ERR_HOST_STATS_NOT_INITIATED, ERR_MASTER_STATS_HOST_NOT_SET,
@@ -446,10 +447,13 @@ pub struct CmdHandler {
     // channel name - list of client id
     subscribers: HashSet<Rc<u64>>,
     channels: HashMap<String, HashSet<Rc<u64>>>,
+
+    // AOF
+    aof: Aof
  }
 
 impl CmdHandler {
-    pub fn new(timer_fd: i32) -> Self{
+    pub fn new(timer_fd: i32, aof: Aof) -> Self{
         Self {
             response_queue: Vec::new(),
             data: HashMap::new(),
@@ -458,6 +462,7 @@ impl CmdHandler {
             flag_backlog_stream: false,
             subscribers: HashSet::new(), 
             channels: HashMap::new(),
+            aof: aof
         }
     }
 
@@ -468,6 +473,10 @@ impl CmdHandler {
     fn _execute_cmd(
         &mut self, cmd: Cmd, buf: Vec<u8>, client_id: u64, epoll_fd: Option<i32>,
         serialized: bool) -> Result<CmdOutput, CmdOutput> {
+        // Some params:
+        // - cmd: the Cmd object
+        // - buf: the resp byte sequence from which the Cmd object is parsed
+
         // Check for subscriber mode and subscriber-allowed cmd
         let is_subscriber = self.is_subscriber(&client_id);
         if is_subscriber && !Self::is_cmd_subscriber_allowed(&cmd) {
@@ -562,9 +571,13 @@ impl CmdHandler {
                 self.flag_backlog_list = is_flag_list;
                 self.flag_backlog_stream = is_flag_stream;
 
-                println!("Success cmd from client {}, broadcasting {}", &client_id, &to_be_broadcast);
+                // println!("Success cmd from client {}, broadcasting {}", &client_id, &to_be_broadcast);
                 let buf_rc = Rc::new(buf);
                 if to_be_broadcast {
+                    // Write to aof
+                    // TODO: this error here is silenced
+                    let _ = self.aof.aof_write(&buf_rc.as_ref());
+
                     // Broadcast by push to response_queue
                     match ClientTable::get().borrow().list_slave() {
                         Some(list) => {
@@ -573,7 +586,7 @@ impl CmdHandler {
                             }
                         }
                         None => {} 
-                    }
+                    };
                 }
                 // }
                 
@@ -583,7 +596,7 @@ impl CmdHandler {
                     AppStates::get().host_add_bytes_count(buf_rc.len() as i64);
                 };
 
-                println!("Resp output {:?}", resp);
+                // println!("Resp output {:?}", resp);
                 // If sending client is master, not response
                 // unless it's REPLCONF GETACK
                 if !is_master | always_response {
@@ -816,6 +829,11 @@ impl CmdHandler {
         };
 
         self.flag_backlog_stream = false;
+    }
+
+    pub fn aof_flush(&mut self) -> Result<(), CustomError> {
+        self.aof.aof_flush()?;
+        Ok(())
     }
 
     fn cmd_ping(is_subscriber: bool) -> Result<Option<RespType>, CustomError> {

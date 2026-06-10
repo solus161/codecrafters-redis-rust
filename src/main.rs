@@ -22,6 +22,7 @@ mod rdb;
 mod custom_data;
 mod geohash;
 mod auth;
+mod aof;
 
 use crate::app_state::{AppStates, Configs, ConfigsBuilder};
 use crate::client::{TcpClient, BUFFER_SIZE};
@@ -33,6 +34,7 @@ use crate::cmd_handler::CmdHandler;
 use crate::rdb::Rdb;
 use crate::replication::ClientTable;
 use crate::auth::{Auth};
+use crate::aof::Aof;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parsing args for port
@@ -44,8 +46,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ConfigsBuilder::new().with_parse_config(&args).build();
     
     // Create dirs of configs
-    let _ = Configs::get().create_dirs();   // panic if any error
-    let aof_file = Configs::get().create_aof_file();
+    let mut aof = Aof::new();
+    let _ = aof.create_dirs();   // panic if any error
+    let _ = aof.create_aof_files();
 
     // Fd for listener 
     let host_stats = app_state.get_host_stats().expect(ERR_HOST_STATS_NOT_INITIATED);
@@ -63,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let timer_fd = timer_create_fd();
 
     let cmd_handler = Rc::new(
-        RefCell::new(CmdHandler::new(timer_fd))
+        RefCell::new(CmdHandler::new(timer_fd, aof))
         );
     
     // Load RDB if any
@@ -256,6 +259,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // not waiting till next cycle
         cmd_handler.borrow_mut().serve_backlog_list(); 
         cmd_handler.borrow_mut().serve_backlog_stream();
+
+        // Write to aof
+        // TODO: silent error here
+        let _ = cmd_handler.borrow_mut().aof_flush();
 
         // BLPOP responses gathered, now flush
         for res in cmd_handler.borrow_mut().response_queue.drain(..) { 
