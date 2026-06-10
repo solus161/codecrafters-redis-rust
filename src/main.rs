@@ -45,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Create dirs of configs
     let _ = Configs::get().create_dirs();   // panic if any error
+    let aof_file = Configs::get().create_aof_file();
 
     // Fd for listener 
     let host_stats = app_state.get_host_stats().expect(ERR_HOST_STATS_NOT_INITIATED);
