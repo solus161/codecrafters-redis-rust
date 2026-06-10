@@ -32,18 +32,21 @@ impl Display for AtomicOffset {
 const KW_DIR: &str = "--dir";
 const KW_DBFILENAME: &str = "--dbfilename";
 const KW_APPENDONLY: &str = "--appendonly";
-const KW_APPENDDIRNAME: &str = "--appendirname";
+const KW_APPENDDIRNAME: &str = "--appenddirname";
 const KW_APPENDFILENAME: &str = "--appendfilename";
 const KW_APPENDFSYNC: &str = "--appendfsync";
 
 // Enum for AppendFsync
+#[derive(Debug)]
 pub enum AppendFsync {
+    Always,
     EverySec
 }
 
 impl AppendFsync {
     pub const fn get_str(&self) -> &'static str {
         match self {
+            Self::Always => "always",
             Self::EverySec => "everysec"
         }
     }
@@ -52,6 +55,7 @@ impl AppendFsync {
 impl Display for AppendFsync {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Always => write!(f, "always"),
             Self::EverySec => write!(f, "everysec")
         }
     }
@@ -62,6 +66,7 @@ impl TryFrom<&str> for AppendFsync {
 
     fn try_from(value: &str) -> Result<Self, CustomError> {
         match value {
+            "always" => Ok(AppendFsync::Always),
             "everysec" => Ok(AppendFsync::EverySec),
             _ => Err(CustomError::InvalidArgument("Invalid arg".to_string()))
         }
@@ -70,6 +75,7 @@ impl TryFrom<&str> for AppendFsync {
 
 
 // Configs
+#[derive(Debug)]
 pub struct Configs {
     path: Option<String>,
     dbfilename: Option<String>, // rdb file name

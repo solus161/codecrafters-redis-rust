@@ -42,6 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Parsing args for configs
     ConfigsBuilder::new().with_parse_config(&args).build();
+    println!("{:?}", Configs::get());
 
     // Fd for listener 
     let host_stats = app_state.get_host_stats().expect(ERR_HOST_STATS_NOT_INITIATED);
