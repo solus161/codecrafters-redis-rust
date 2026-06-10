@@ -449,11 +449,11 @@ pub struct CmdHandler {
     channels: HashMap<String, HashSet<Rc<u64>>>,
 
     // AOF
-    aof: Aof
+    aof: Option<Aof>
  }
 
 impl CmdHandler {
-    pub fn new(timer_fd: i32, aof: Aof) -> Self{
+    pub fn new(timer_fd: i32, aof: Option<Aof>) -> Self{
         Self {
             response_queue: Vec::new(),
             data: HashMap::new(),
@@ -464,6 +464,10 @@ impl CmdHandler {
             channels: HashMap::new(),
             aof: aof
         }
+    }
+
+    pub fn set_aof(&mut self, aof: Aof) {
+        self.aof = Some(aof);
     }
 
     pub fn load_data(&mut self, data: HashMap<String, StoreItem>) {
@@ -576,7 +580,9 @@ impl CmdHandler {
                 if to_be_broadcast {
                     // Write to aof
                     // TODO: this error here is silenced
-                    let _ = self.aof.aof_write(&buf_rc.as_ref());
+                    if let Some(aof) = &mut self.aof {
+                        let _ = aof.aof_write(&buf_rc.as_ref());
+                    };
 
                     // Broadcast by push to response_queue
                     match ClientTable::get().borrow().list_slave() {
@@ -832,7 +838,9 @@ impl CmdHandler {
     }
 
     pub fn aof_flush(&mut self) -> Result<(), CustomError> {
-        self.aof.aof_flush()?;
+        if let Some(aof) = &mut self.aof {
+            aof.aof_flush()?;
+        };
         Ok(())
     }
 

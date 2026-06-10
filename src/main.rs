@@ -35,6 +35,7 @@ use crate::rdb::Rdb;
 use crate::replication::ClientTable;
 use crate::auth::{Auth};
 use crate::aof::Aof;
+use crate::resp::RespParser;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parsing args for port
@@ -45,12 +46,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parsing args for configs
     ConfigsBuilder::new().with_parse_config(&args).build();
     
-    // Create dirs of configs
-    let mut aof = Aof::new();
-    let _ = aof.create_dirs();   // panic if any error
-    let _ = aof.create_aof_files();
+    // Fd for timer
+    let timer_fd = timer_create_fd();
 
-    // Fd for listener 
+    // Create the real handler, replay AOF into it, then attach the Aof for future writes
+    let mut aof = Aof::new();
+    let parser = RespParser::new();
+    let mut cmd_handler_init = CmdHandler::new(timer_fd, None);
+    let _ = aof.init_sequence(parser, &mut cmd_handler_init);
+    cmd_handler_init.set_aof(aof);
+
+    // Fd for listener
     let host_stats = app_state.get_host_stats().expect(ERR_HOST_STATS_NOT_INITIATED);
     let host = host_stats.get_host().unwrap();
     let port = host_stats.get_port().unwrap();
@@ -58,16 +64,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     listener.set_nonblocking(true).unwrap();
     let listener_fd = listener.as_raw_fd();
     let listener_fd_u64 = listener_fd as u64;
-    
+
     // To store all clients or a master
     let mut clients: HashMap<u64, TcpClient> = HashMap::new();
 
-    // Fd for timer
-    let timer_fd = timer_create_fd();
-
-    let cmd_handler = Rc::new(
-        RefCell::new(CmdHandler::new(timer_fd, aof))
-        );
+    let cmd_handler = Rc::new(RefCell::new(cmd_handler_init));
     
     // Load RDB if any
     if let (Some(path), Some(filename)) = Configs::get().dbfilepath() {
@@ -77,7 +78,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cmd_handler.borrow_mut().load_data(data);
             };
         };
-        
     }
 
     // Get fd on epoll event
@@ -113,13 +113,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         // Store master
         clients.insert(master_fd, client_master);
-
-        // Initiate handshake
-        // client_master.init_handshake();
-        // clients.insert(
-        //     master_fd.try_into().unwrap(),
-        //     client_master
-        //     );
     };
 
     // Add listener to epoll for changes
