@@ -152,6 +152,63 @@ impl Configs {
     pub fn get() -> &'static Self {
         CONFIGS.get().expect("Config not initiated")
     }
+
+    pub fn create_dirs(&self) -> Result<(), CustomError> {
+        // The appendonly flag trigger the creation
+        if !self.appendonly { return Ok(())};
+
+        if let Some(path) = &self.path {
+            fs::create_dir_all(path).expect("Error create base dir"); 
+        };
+
+        if !self.appenddirname.is_empty() {
+            let aof_dir = match &self.path {
+                Some(base) => format!("{}/{}", base, self.appenddirname),
+                None => self.appenddirname.clone(),
+            };
+            fs::create_dir_all(aof_dir).expect("Error create AOF dir");
+        };
+
+        Ok(())
+    }
+
+    fn get_latest_aof_id(&self) -> Option<u64> {
+        let aof_dir = format!(
+            "{}/{}",
+            &self.path.as_deref().expect("No base path"),
+            &self.appenddirname
+            );
+
+        let msg_err = "Error reading append dir";
+        let id = fs::read_dir(aof_dir).expect(msg_err)
+            .filter_map(|e| {
+                let entry = e.expect(msg_err);
+                let name = entry.file_name().into_string()
+                    .expect(msg_err);
+
+                let splitted_name: Vec<&str> = name.split('.').collect();
+                splitted_name[2].parse::<u64>().ok()
+            }).max();
+        id
+    }
+
+    pub fn create_aof_file(&self) -> Result<Option<fs::File>, CustomError> {
+        // If the appendfilename = "appendonly.aof"
+        // subsequent created files will have name appendonly.aof.x.incr.aof_dir
+        // with x increasing integer
+        if !self.appendonly { return Ok(None)}
+
+        let id = self.get_latest_aof_id().unwrap_or(1);
+        let filepath = format!(
+            "{}/{}/{}.{}.incr.aof",
+            &self.path.as_deref().expect("No base path"),
+            &self.appenddirname,
+            &self.appendfilename,
+            &id);
+        let file = fs::File::create(&filepath).expect(
+            &format!("Error creating AOF file {}", &filepath));
+        Ok(Some(file))
+    }
 }
 
 // ConfigBuilder
