@@ -1900,28 +1900,16 @@ impl CmdHandler {
     fn cmd_config(arg: CmdArg) -> Result<Option<RespType>, CustomError> {
         let config = Configs::get();
         match arg {
-            CmdArg::Get(s) => {
-                if s == "dir" {
-                    let path = config.get_rdb_path().unwrap_or(&"".to_string()).to_string();
-                    let mut resp_arr = RespType::Array { length: 2, value: None };
-                    let resp_arg = RespType::BulkStr { length: 3, value: Some("dir".to_string()) };
-                    let resp_path = RespType::BulkStr { length: path.len(), value: Some(path.to_string()) };
-                    resp_arr.add_item(resp_arg);
-                    resp_arr.add_item(resp_path);
-                    Ok(Some(resp_arr))
-                } else if s == "dbfilename" {
-                    let filename = config.get_rdb_filename().unwrap_or(&"".to_string()).to_string();
-                    let mut resp_arr = RespType::Array { length: 2, value: None };
-                    let resp_arg = RespType::BulkStr { length: 3, value: Some("dir".to_string()) };
-                    let resp_filename = RespType::BulkStr {
-                        length: filename.len(),
-                        value: Some(filename.to_string()) };
-                    resp_arr.add_item(resp_arg);
-                    resp_arr.add_item(resp_filename);
-                    Ok(Some(resp_arr))
-                } else {
-                    Err(CustomError::UnsupportedCmd(format!("Invalid arg {}", &s)))
-                }
+            CmdArg::Get(key) => {
+                let value = config.get_attr(&key)?;
+                let mut resp_arr = RespType::Array { length: 2, value: None };
+                let resp_key = RespType::BulkStr { length: key.len(), value: Some(key) };
+                let resp_value = RespType::BulkStr {
+                    length: value.len(),
+                    value: Some(value.to_string()) };
+                resp_arr.add_item(resp_key);
+                resp_arr.add_item(resp_value);
+                Ok(Some(resp_arr))
             },
             _ => Err(CustomError::UnsupportedCmdStructure("Unsupported arg".to_string()))
         }

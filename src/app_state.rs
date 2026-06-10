@@ -3,7 +3,7 @@ use std::fs;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{OnceLock};
 
-use crate::exceptions::{ ERR_RDB_CREATE };
+use crate::exceptions::{ CustomError, ERR_RDB_CREATE };
 
 pub struct AtomicOffset(AtomicI64);
 
@@ -28,37 +28,115 @@ impl Display for AtomicOffset {
 }
 
 // Config and config builder ____________________________________________________________
+// Flags for config parsing
+const KW_DIR: &str = "--dir";
+const KW_DBFILENAME: &str = "--dbfilename";
+const KW_APPENDONLY: &str = "--appendonly";
+const KW_APPENDDIRNAME: &str = "--appendirname";
+const KW_APPENDFILENAME: &str = "--appendfilename";
+const KW_APPENDFSYNC: &str = "--appendfsync";
+
+// Enum for AppendFsync
+pub enum AppendFsync {
+    EverySec
+}
+
+impl AppendFsync {
+    pub const fn get_str(&self) -> &'static str {
+        match self {
+            Self::EverySec => "everysec"
+        }
+    }
+}
+
+impl Display for AppendFsync {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EverySec => write!(f, "everysec")
+        }
+    }
+}
+
+impl TryFrom<&str> for AppendFsync {
+    type Error = CustomError;
+
+    fn try_from(value: &str) -> Result<Self, CustomError> {
+        match value {
+            "everysec" => Ok(AppendFsync::EverySec),
+            _ => Err(CustomError::InvalidArgument("Invalid arg".to_string()))
+        }
+    }
+}
+
+
+// Configs
 pub struct Configs {
-    rdb_path: Option<String>,
-    rdb_filename: Option<String>,
+    path: Option<String>,
+    dbfilename: Option<String>, // rdb file name
+    appendonly: bool,           // there are for aof persistence
+    appenddirname: String,
+    appendfilename: String,
+    appendfsync: AppendFsync,
 }
 
 impl Configs {
     pub fn new() -> Self {
         Self {
-            rdb_path: None,
-            rdb_filename: None
+            path: Some("/app".to_string()),
+            dbfilename: None,
+            appendonly: false,
+            appenddirname: "appendonlydir".to_string(),     // relative path
+            appendfilename: "appendonly.aof".to_string(),
+            appendfsync: AppendFsync::EverySec
         }
     }
 
-    pub fn get_rdb_path(&self) -> Option<&String> {
-        self.rdb_path.as_ref()
+    pub fn get_attr(&self, key: &str) -> Result<&str, CustomError> {
+        match key {
+            "dir" => Ok(self.path.as_ref().map_or("none", |s| s.as_ref())),
+            "dbfilename" => Ok(self.dbfilename.as_ref().map_or("", |f| f.as_ref())),
+            "appendonly" => Ok(self.appendonly.then(|| {"yes"}).unwrap_or("no")),
+            "appenddirname" => Ok(self.appenddirname.as_ref()),
+            "appendfilename" => Ok(self.appendfilename.as_ref()),
+            "appendfsync" => Ok(self.appendfsync.get_str().as_ref()),
+            _ => Err(CustomError::UnsupportedCmd("Unsupported".to_string()))
+        }
     }
 
-    pub fn set_rdb_path(&mut self, rdb_path: &str) {
-        self.rdb_path = Some(rdb_path.into())
+    pub fn path(&self) -> Option<&String> {
+        self.path.as_ref()
     }
 
-    pub fn get_rdb_filename(&self) -> Option<&String> {
-        self.rdb_filename.as_ref()
+    pub fn set_path(&mut self, path: &str) {
+        self.path = Some(path.into())
     }
 
-    pub fn set_rdb_filename(&mut self, rdb_filename: &str) {
-        self.rdb_filename = Some(rdb_filename.into())
+    pub fn dbfilename(&self) -> Option<&String> {
+        self.dbfilename.as_ref()
     }
 
-    pub fn get_rdb_filepath(&self) -> (Option<&String>, Option<&String>) {
-        (self.get_rdb_path(), self.get_rdb_filename())
+    pub fn set_dbfilename(&mut self, dbfilename: &str) {
+        self.dbfilename = Some(dbfilename.into())
+    }
+
+    pub fn dbfilepath(&self) -> (Option<&String>, Option<&String>) {
+        (self.path(), self.dbfilename())
+    }
+
+    pub fn set_appendonly(&mut self, value: bool) {
+        self.appendonly = value
+    }
+
+    pub fn set_appenddirname(&mut self, value: &str) {
+        self.appenddirname = value.to_string()
+    }
+
+    pub fn set_appendfilename(&mut self, value: &str) {
+        self.appendfilename = value.to_string()
+    }
+
+    pub fn set_appendfsync(&mut self, value: AppendFsync) {
+        self.appendfsync = value
     }
 
     pub fn build(self) {
@@ -70,6 +148,7 @@ impl Configs {
     }
 }
 
+// ConfigBuilder
 pub struct ConfigsBuilder {
     configs: Configs
 }
@@ -83,27 +162,39 @@ impl ConfigsBuilder {
 
     pub fn with_parse_config(mut self, args: &Vec<String>) -> Self {
         let mut i = 1;
-        let mut dir: Option<String> = None;
-        let mut filename: Option<String> = None;
+        let yes_no_to_bool = |s: &str| {
+            match s {
+                "yes" => true,
+                "no" => false,
+                _ => panic!("Unsupported value")
+            } 
+        };
+        
         while i < args.len() {
-            match &args[i] {
-                s if s == "--dir" => {
-                    dir = Some(args[i+1].clone());
+            match args[i].as_str() {
+                KW_DIR => {
+                    self.configs.set_path(&args[i+1]);
                 },
-                s if s == "--dbfilename" => {
-                    filename = Some(args[i+1].clone());
+                KW_DBFILENAME => {
+                    self.configs.set_dbfilename(&args[i+1]);
                 },
+                KW_APPENDONLY => {
+                    self.configs.set_appendonly(yes_no_to_bool(&args[i+1]))
+                },
+                KW_APPENDDIRNAME => {
+                    self.configs.set_appenddirname(&args[i+1]);
+                },
+                KW_APPENDFILENAME => {
+                    self.configs.set_appendfilename(&args[i+1]);
+                },
+                KW_APPENDFSYNC => {
+                    let append_fsync = AppendFsync::try_from(args[i+1].as_str())
+                        .expect("Unsupported value");
+                    self.configs.set_appendfsync(append_fsync);
+                }
                 _ => {}
             };
             i += 2
-        };
-
-        if let Some(s) = dir {
-            self.configs.set_rdb_path(&s);
-        };
-
-        if let Some(s) = filename {
-            self.configs.set_rdb_filename(&s);
         };
         self
     }

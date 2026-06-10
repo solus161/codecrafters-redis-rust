@@ -113,7 +113,6 @@ impl Auth {
                         let _ = self.clients.insert(*client_id, username_rc);
                         Ok(())
                     } else {
-                        println!("Wrong pass");
                         Err(err)
                     }
                 } else {

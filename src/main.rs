@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     
     // Load RDB if any
-    if let (Some(path), Some(filename)) = Configs::get().get_rdb_filepath() {
+    if let (Some(path), Some(filename)) = Configs::get().dbfilepath() {
         let filepath = format!("{}/{}", path, filename);
         if let Some(mut rdb) = Rdb::open(filepath) {
             if let Ok(data) = rdb.read() {
