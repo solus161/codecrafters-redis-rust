@@ -296,7 +296,7 @@ pub struct AppStates {
 }
 
 impl AppStates {
-    pub fn init(args: &Vec<String>) {
+    pub fn init(args: &[String]) {
         let mut host: Option<String> = None;
         let mut port: Option<u16> = None;
         let mut replica_stats: Option<String> = None;
@@ -346,11 +346,8 @@ impl AppStates {
     }
 
     pub fn host_add_bytes_count(&self, count: i64) {
-        match &self.host_stats {
-            Some(stats) => {
-                stats.add_bytes_count(count);
-            },
-            None => {}
+        if let Some(stats) = &self.host_stats {
+            stats.add_bytes_count(count);
         }
     }
 }

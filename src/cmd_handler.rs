@@ -928,24 +928,22 @@ impl CmdHandler {
                         };
 
                         // Convert negative index to positive index
-                        let start_abs: i64;
-                        let stop_abs: i64;
-
-                        if start < 0 {
-                            start_abs = (list.len() as i64 + start).max(0);
+                        let start_abs: i64 = if start < 0 {
+                            (list.len() as i64 + start).max(0)
                         } else {
-                            start_abs = start;
-                        }
+                            start
+                        };
 
-                        if stop < 0 {
-                            stop_abs = (list.len() as i64 + stop).max(0);
+                        let stop_abs: i64 = if stop < 0 {
+                            (list.len() as i64 + stop).max(0)
                         } else {
-                            stop_abs = stop;
+                            stop
                         };
 
                         let max_index = stop_abs.min(list.len() as i64 - 1) as usize;
                         let min_index = start_abs.min(list.len() as i64 - 1) as usize;
-                        let output_len = max_index - min_index + 1;
+                        let output_len = if max_index < min_index { 0 } 
+                            else {max_index - min_index.min(max_index) + 1};
                         if output_len == 0 {
                             Ok(Some(RespType::Array{
                                 length: output_len, 
@@ -953,7 +951,7 @@ impl CmdHandler {
                             }))
                         } else {
                             let mut output = RespType::Array{
-                                length: output_len as usize,
+                                length: output_len,
                                 value: Some(VecDeque::<RespType>::new())};
                             
                             for i in list.iter().skip(min_index).take(output_len){
