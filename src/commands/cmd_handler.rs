@@ -2295,7 +2295,7 @@ impl CmdHandler {
     fn cmd_setbit(&mut self, key: String, offset: usize, bit: u8) -> Result<Option<RespType>, CustomError> {
         let store_item = self.data.entry(key).or_insert(
             StoreItem::new(
-                StoreValue::Bitmap(Bitmap::new(offset)),
+                StoreValue::Bitmap(Bitmap::new(offset + 1)),
                 None,
                 )
             );
@@ -2331,9 +2331,7 @@ impl CmdHandler {
                     Ok(Some(RespType::Integer(Some(value as i64))))
                 }
                 StoreValue::Str(s) => {
-                    // Bit order of String that client sent is reversed
                     let bitmap = s.as_bytes();
-                    let offset = offset % 8 * 8 + (8 - offset - 1);
                     let value = BitOps::get(bitmap, offset).unwrap_or(0);
                     Ok(Some(RespType::Integer(Some(value as i64))))
                 }

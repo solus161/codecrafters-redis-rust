@@ -150,7 +150,8 @@ impl BitOps {
     {
         let block_index = offset / 8;
         let block = map.get(block_index).ok_or(CustomError::OutOfIndex)?;
-        let block_offset = offset % 8;
+        // Redis bit order: offset 0 is the most significant bit of the first byte
+        let block_offset = 7 - offset % 8;
         let mask = 1u8 << block_offset;
         if  *block & mask != 0 {
             Ok(1)
@@ -163,7 +164,7 @@ impl BitOps {
     {
         let block_index = offset / 8;
         let block = map.get_mut(block_index).ok_or(CustomError::OutOfIndex)?;
-        let block_offset = offset % 8;
+        let block_offset = 7 - offset % 8;
 
         match value {
             BitValue::One => {
@@ -195,7 +196,7 @@ impl Bitmap {
 
     /// Extend the bitmap to accomodate `offset`
     pub fn extend(&mut self, offset: usize) {
-        let extend = offset.div_ceil(8) - (self.0.len() - 1);
+        let extend = (offset + 1).div_ceil(8).saturating_sub(self.0.len());
         if extend > 0 {
             let new_map: Vec<u8> = (0..extend).map(|_| 0u8).collect();
             self.0.extend(new_map);
