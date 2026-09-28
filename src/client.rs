@@ -7,8 +7,8 @@ use std::rc::Rc;
 use crate::auth::Auth;
 use crate::exceptions::{CustomError, ERR_HOST_STATS_NOT_INITIATED, ERR_MASTER_STATS_PORT_NOT_SET};
 use crate::{ AppStates };
-use crate::cmd_handler::CmdHandler; 
-use crate::cmd_builder::{
+use crate::commands::cmd_handler::CmdHandler; 
+use crate::commands::cmd_builder::{
     Cmd, KW_CAPA, KW_LISTENING_PORT, KW_PING, KW_PSYNC, KW_REPLCONF};
 use crate::resp::{ RespType, RespParser };
 use crate::ClientTable;

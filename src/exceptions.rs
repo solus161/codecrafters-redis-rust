@@ -26,6 +26,7 @@ pub enum CustomError {
     FileReadingError,
     RDBParsingError,
     WrongUsernamePassword(String),
+    OutOfIndex,
     Dummy
 }
 
@@ -46,6 +47,7 @@ impl CustomError {
             },
             Self::FileReadingError | // Not yet implemented
             Self::RDBParsingError  |
+            Self::OutOfIndex |
             Self::Dummy => RespType::NullBulkStr // Just a placeholder
         }
     }

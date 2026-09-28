@@ -9,6 +9,7 @@ use base64::{ Engine, engine::general_purpose::STANDARD };
 
 use crate::aof::Aof;
 use crate::auth::{Auth, AuthFlags};
+use crate::commands::data_types::{Bitmap, BitValue, BitOps};
 use crate::exceptions::{
     CustomError, ERR_HOST_STATS_NOT_INITIATED, ERR_MASTER_STATS_HOST_NOT_SET,
     ERR_MASTER_STATS_NOT_INITIATED, ERR_MASTER_STATS_PORT_NOT_SET};
@@ -16,164 +17,14 @@ use crate::resp::{ RespType };
 use crate::epoll::{
     add_interest, get_epoll_event_read,
     remove_interest, timer_create_event};
-use crate::cmd_builder::{
+use super::cmd_builder::{
     AclRules, Cmd, CmdArg, KW_ACK, KW_FULLRESYNC, KW_GETACK, KW_PONG, KW_QUEUED, KW_REPLCONF, KW_REPLICATION };
 use crate::utils::now;
 use crate::app_state::{AppStates, Configs};
 use crate::{ClientTable};
 use crate::geohash;
 
-
-// A B
-
-// Wrapper for score value f64 needed
-// because BTreeMap requires the key to implement Ord
-// while f64 does not implement Ord (due to NaN value), only PartialOrd
-#[derive(PartialEq, Debug)]
-pub struct Score(f64);  // wrapper for f64 used in ZSet
-
-impl Eq for Score {}    // This is no fn trait, for Score(_) == Score(_)
-
-// PartialOrd and Ord must agree, or non-canonical implementations error
-// thus partial_cmp(a, b) must == Some(cmp(a, b))
-impl PartialOrd for Score {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-// f64 implemented PartialOrd, then partial_cmp
-impl Ord for Score {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap()
-    }
-}
-
-// SortedSet neet a separate implementation
-// as both member is unique, and score need to be SortedSet
-#[derive(Debug)]
-pub struct SortedSet<> {
-    members: HashMap<Rc<String>, f64>,      // No need Rc<f64>, not saving any mem
-    scores: BTreeMap<(Score, Rc<String>), ()>,
-}
-
-impl SortedSet {
-    pub fn new() -> Self {
-        Self { members: HashMap::new(), scores: BTreeMap::new() }
-    }
-
-    pub fn members(&self) -> &HashMap<Rc<String>, f64> {
-        &self.members
-    }
-
-    pub fn add(&mut self, score: f64, member: String) -> i64 {
-        // Add or update score of a member
-        // Return the nbr of newly added member
-        let mut new_mem_count = 1;
-        let member_rc = Rc::from(member);
-
-        if self.members.contains_key(&member_rc) {
-            // Remove score
-            let _ = self.scores.remove(&(Score(score), member_rc.clone())); 
-            new_mem_count = 0;
-        };
-
-        // Add new
-        self.members.insert(member_rc.clone(), score);
-        self.scores.insert((Score(score), member_rc), ());
-        new_mem_count
-    }
-
-    pub fn rank_by_score(&self, member: &Rc<String>) -> Option<i64> {
-        let score = self.members.get(member)?;
-        let target_score = (Score(*score), member.clone());
-        let rank = self.scores.range(..target_score).count();
-        Some(rank as i64)
-    }
-
-    pub fn get_members(&self, start_idx: i64, end_idx: i64) -> Vec<String> {
-        let member_count = self.scores.len() as i64;
-
-        // Handle negative index
-        let start_idx = if start_idx < 0 {
-            (member_count + start_idx).max(0)
-        } else {
-            start_idx
-        };
-
-        let end_idx = if end_idx < 0 {
-            (member_count + end_idx).max(0)
-        } else {
-            end_idx
-        };
-
-        if end_idx < start_idx { return Vec::new()};
-
-        self.scores.iter()
-            .skip(start_idx as usize)
-            .take((end_idx - start_idx + 1) as usize)
-            .map(|((_, member_rc), ())| (**member_rc).clone())
-            .collect()
-    }
-
-    pub fn get_score(&self, member: &Rc<String>) -> Option<f64> {
-        self.members.get(member).copied()
-    }
-
-    pub fn remove(&mut self, member: String) -> i64 {
-        let member_rc = Rc::from(member);
-        if let Some(score) =  self.members.remove(&member_rc) {
-            self.scores.remove(&(Score(score), member_rc));
-            1
-        } else {
-            0
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.members.len()
-    }
-    
-}
-
-
-// Stored value types for CmdHandler
-#[derive(Debug)]
-pub enum StoreValue {
-    Str(String),
-    List(VecDeque<String>),
-    Set(HashSet<String>),
-    ZSet(SortedSet),
-    Hash(HashMap<String, String>),
-    // timestamp id - (timestamp, order, Vec of String)
-    Stream(BTreeMap<(u64, u64), Vec<String>>),
-    VectorSet(String),
-    None
-}
-
-impl StoreValue {
-    const fn get_type(&self) -> &str {
-        match self {
-            Self::Str(_) => "string", 
-            Self::List(_) => "list",
-            Self::Set(_) => "set",
-            Self::ZSet(_) => "zset",
-            Self::Hash(_) => "hash",
-            Self::Stream(_) => "stream",
-            Self::VectorSet(_) => "vectorset",
-            _ => "none",
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct StoreItem { value: StoreValue, expired_at: Option<u64> }
-
-impl StoreItem {
-    pub fn new(value: StoreValue, expired_at: Option<u64>) -> Self {
-        Self { value, expired_at }
-    }
-}
+use super::data_types::{SortedSet, StoreValue, StoreItem};
 
 type Task = Box<dyn FnOnce(&mut CmdHandler)>;
 
@@ -564,7 +415,10 @@ impl CmdHandler {
             Cmd::GEODIST { key, members } => self.cmd_geodist(key, members),
             Cmd::GEOSEARCH { key, from_arg, by_arg } => self.cmd_geosearch(key, from_arg, by_arg),
             Cmd::Acl(opt) => self.cmd_acl(opt, client_id),
-            Cmd::Auth { username, password } => self.cmd_auth(username, password, client_id)
+            Cmd::Auth { username, password } => self.cmd_auth(username, password, client_id),
+            Cmd::SETBIT { key, offset, bit } => self.cmd_setbit(key, offset, bit),
+            Cmd::GETBIT { key, offset } => self.cmd_getbit(key, offset),
+            Cmd::STRLEN(key) => self.cmd_strlen(key),
             // _ => None
         };
 
@@ -887,6 +741,14 @@ impl CmdHandler {
                         value: value
                     }))
                 },
+                StoreValue::Bitmap(x) => {
+                    let bytes: Vec<u8> = x.iter().rev().map(|x| *x).collect();
+                    let value: String = String::from_utf8(bytes)?;
+                    Ok(Some(RespType::BulkStr { 
+                        length: value.len(),
+                        value: Some(value),
+                    }))
+                }
                 _ => Err(CustomError::UnsupportedCmd(format!("Unsupported command {}", &key)))
             },
             // No key found
@@ -2428,5 +2290,69 @@ impl CmdHandler {
             .map_or_else(
                 |_e| Err(CustomError::WrongUsernamePassword(msg.to_string())),
                 |_| Ok(Self::response_ok()))
+    }
+
+    fn cmd_setbit(&mut self, key: String, offset: usize, bit: u8) -> Result<Option<RespType>, CustomError> {
+        let store_item = self.data.entry(key).or_insert(
+            StoreItem::new(
+                StoreValue::Bitmap(Bitmap::new(offset)),
+                None,
+                )
+            );
+
+        match &mut store_item.value {
+            StoreValue::Bitmap(bitmap) => {
+                let old_bit = BitOps::get(bitmap, offset).unwrap_or(0);
+                if old_bit != bit {
+                    let bit_value = BitValue::try_from(bit)?;
+                    match BitOps::set(bitmap, offset, &bit_value) {
+                        Ok(()) => {}
+                        Err(_) => {
+                            // Must extend the bitmap
+                            bitmap.extend(offset);
+                            BitOps::set(bitmap, offset, &bit_value)?
+                        }
+                    };
+                }
+                Ok(Some(RespType::Integer(Some(old_bit as i64))))
+            },
+            _ => Err(CustomError::Dummy)
+        }
+    }
+
+    /// WARNING: bit order of Bitmap and String is different, this is purely convention
+    /// - Bitmap: 00000010 -> get offset 1 -> 1
+    /// - String: 00000010 -> get offset 1 -> 0, offset 1 is the 2nd significant bit instead
+    fn cmd_getbit(&self, key: String, offset: usize) -> Result<Option<RespType>, CustomError> {
+        if let Some(store_item) = self.data.get(&key) {
+            match &store_item.value {
+                StoreValue::Bitmap(bitmap) => {
+                    let value = BitOps::get(bitmap, offset)?;
+                    Ok(Some(RespType::Integer(Some(value as i64))))
+                }
+                StoreValue::Str(s) => {
+                    // Bit order of String that client sent is reversed
+                    let bitmap = s.as_bytes();
+                    let value = BitOps::get(bitmap, 8 - offset - 1)?;
+                    Ok(Some(RespType::Integer(Some(value as i64))))
+                }
+                _ => Err(CustomError::UnprocessableError("Wrong data type".to_string()))
+            }
+        } else {
+            Ok(Some(RespType::Integer(Some(0))))
+        }
+    }
+
+    fn cmd_strlen(&self, key: String) -> Result<Option<RespType>, CustomError> {
+        if let Some(store_item) = self.data.get(&key) {
+            match &store_item.value {
+                StoreValue::Bitmap(bitmap) => {
+                    Ok(Some(RespType::Integer(Some(bitmap.len() as i64))))
+                }
+                _ => Err(CustomError::UnprocessableError("Wrong data type".to_string()))
+            }
+        } else {
+            Ok(Some(RespType::Integer(Some(0))))
+        }
     }
 }

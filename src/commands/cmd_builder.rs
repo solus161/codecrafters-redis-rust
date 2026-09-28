@@ -1,6 +1,7 @@
 use std::collections::{ VecDeque };
 use std::u64;
 
+use crate::commands::utils::resp_arg;
 use crate::exceptions::CustomError;
 use crate::resp::{ RespType };
 
@@ -69,6 +70,9 @@ const KW_WHOAMI: &str = "WHOAMI";
 const KW_GETUSER: &str = "GETUSER";
 const KW_SETUSER: &str = "SETUSER";
 const KW_AUTH: &str = "AUTH";
+const KW_SETBIT: &str = "SETBIT";
+const KW_GETBIT: &str = "GETBIT";
+const KW_STRLEN: &str = "STRLEN";
 
 #[derive(Debug, PartialEq)]
 pub enum AclRules {
@@ -109,7 +113,6 @@ pub enum CmdArg {
     WhoAmI,
     GetUser(String),
     SetUser{ key: String, rules: Vec<AclRules>},
-    
 }
 
 impl CmdArg {
@@ -166,7 +169,7 @@ impl CmdArg {
                 // Parsing rules
                 let rules = AclRules::set(values)?;
                 Ok(Self::SetUser{ key: username, rules: vec![rules] })
-            }
+            },
             _ => Err(CustomError::InvalidArgument(format!("Invalid arg for {}", &key))),
         }
     }
@@ -222,7 +225,10 @@ pub enum Cmd {
     GEODIST{ key: String, members: Vec<String> },
     GEOSEARCH{ key: String, from_arg: CmdArg, by_arg: CmdArg},
     Acl(CmdArg),
-    Auth{ username: String, password: String}
+    Auth{ username: String, password: String},
+    SETBIT{ key: String, offset: usize, bit: u8},
+    GETBIT{ key: String, offset: usize },
+    STRLEN(String),
 }
 
 impl Cmd {
@@ -1124,7 +1130,7 @@ impl Cmd {
         Ok(Self::Acl(opt)) 
     }
 
-    fn auth(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
+    fn auth(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
         let msg_username = "Username not provided";
         let username = values.pop_front()
             .ok_or(CustomError::MissingArgument(msg_username.to_string()))?
@@ -1138,6 +1144,26 @@ impl Cmd {
             .ok_or(CustomError::MissingArgument(msg_password.to_string()))?;
 
         Ok(Self::Auth { username, password })
+    }
+
+    fn setbit(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let key = resp_arg!(values, "Bit key not provided", String);
+        let offset = resp_arg!(values, "Bit offset not provided", String).parse::<usize>()?;
+        let bit = resp_arg!(values, "Bit value not provided", String).parse::<u8>()?;
+
+        Ok(Self::SETBIT { key, offset, bit })
+    }
+
+    fn getbit(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let key = resp_arg!(values, "Bit key not provided", String);
+        let offset = resp_arg!(values, "Bit offset not provided", String).parse::<usize>()?;
+
+        Ok(Self::GETBIT { key, offset })
+    }
+
+    fn strlen(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let key = resp_arg!(values, "Bit key not provided", String);
+        Ok(Self::STRLEN(key))
     }
 
     pub fn from_resp(resp_type: RespType) -> Result<Self, CustomError> {
@@ -1207,6 +1233,9 @@ impl Cmd {
                                         KW_GEOSEARCH => Self::geosearch(v),
                                         KW_ACL => Self::acl(v),
                                         KW_AUTH => Self::auth(v),
+                                        KW_SETBIT => Self::setbit(v),
+                                        KW_GETBIT => Self::getbit(v),
+                                        KW_STRLEN => Self::strlen(v),
                                         _ => Err(
                                             CustomError::InvalidArgument("Invalid command".to_string()))
                                     } 

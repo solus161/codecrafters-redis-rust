@@ -11,15 +11,13 @@ mod app_state;
 #[macro_use]
 mod utils;
 mod epoll;
-mod cmd_builder;
-mod cmd_handler;
+mod commands;
 mod client;
 mod resp;
 mod replication;
 mod tests;
 mod exceptions;
 mod rdb;
-mod custom_data;
 mod geohash;
 mod auth;
 mod aof;
@@ -30,7 +28,7 @@ use crate::epoll::{timer_create_fd};
 use crate::exceptions::{
     ERR_CREATING_EPOLL, ERR_HOST_STATS_NOT_INITIATED,
     ERR_MASTER_STATS_HOST_NOT_SET, ERR_MASTER_STATS_PORT_NOT_SET};
-use crate::cmd_handler::CmdHandler;
+use crate::commands::cmd_handler::CmdHandler;
 use crate::rdb::Rdb;
 use crate::replication::ClientTable;
 use crate::auth::{Auth};
