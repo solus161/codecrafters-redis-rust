@@ -2333,7 +2333,8 @@ impl CmdHandler {
                 StoreValue::Str(s) => {
                     // Bit order of String that client sent is reversed
                     let bitmap = s.as_bytes();
-                    let value = BitOps::get(bitmap, 8 - offset - 1)?;
+                    let offset = offset % 8 * 8 + (8 - offset - 1);
+                    let value = BitOps::get(bitmap, offset).unwrap_or(0);
                     Ok(Some(RespType::Integer(Some(value as i64))))
                 }
                 _ => Err(CustomError::UnprocessableError("Wrong data type".to_string()))
