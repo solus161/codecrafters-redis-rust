@@ -2327,7 +2327,7 @@ impl CmdHandler {
         if let Some(store_item) = self.data.get(&key) {
             match &store_item.value {
                 StoreValue::Bitmap(bitmap) => {
-                    let value = BitOps::get(bitmap, offset)?;
+                    let value = BitOps::get(bitmap, offset).unwrap_or(0);
                     Ok(Some(RespType::Integer(Some(value as i64))))
                 }
                 StoreValue::Str(s) => {
