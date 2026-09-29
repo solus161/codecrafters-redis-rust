@@ -9,7 +9,7 @@ use base64::{ Engine, engine::general_purpose::STANDARD };
 
 use crate::aof::Aof;
 use crate::auth::{Auth, AuthFlags};
-use crate::commands::data_types::{Bitmap, BitValue, BitOps};
+use crate::commands::data_types::{Bitmap, BitValue, BitOps, BitRange};
 use crate::exceptions::{
     CustomError, ERR_HOST_STATS_NOT_INITIATED, ERR_MASTER_STATS_HOST_NOT_SET,
     ERR_MASTER_STATS_NOT_INITIATED, ERR_MASTER_STATS_PORT_NOT_SET};
@@ -419,6 +419,8 @@ impl CmdHandler {
             Cmd::SETBIT { key, offset, bit } => self.cmd_setbit(key, offset, bit),
             Cmd::GETBIT { key, offset } => self.cmd_getbit(key, offset),
             Cmd::STRLEN(key) => self.cmd_strlen(key),
+            Cmd::BITCOUNT { key, range } => self.cmd_bitcount(key, range),
+            Cmd::BITOP(args) => self.cmd_bitop(args),
             // _ => None
         };
 
@@ -2353,5 +2355,69 @@ impl CmdHandler {
         } else {
             Ok(Some(RespType::Integer(Some(0))))
         }
+    }
+
+    fn cmd_bitcount(&self, key: String, range: Option<BitRange>) -> Result<Option<RespType>, CustomError> {
+        if let Some(store_item) = self.data.get(&key) {
+            match &store_item.value {
+                StoreValue::Bitmap(bitmap) => {
+                    let count = BitOps::bit_count(bitmap, range);
+                    Ok(Some(RespType::Integer(Some(count as i64))))
+                }
+                StoreValue::Str(s) => {
+                    let bitmap = s.as_bytes();
+                    let count = BitOps::bit_count(bitmap, range);
+                    Ok(Some(RespType::Integer(Some(count as i64))))
+                }
+                _ => Err(CustomError::UnprocessableError("Wrong data type".to_string()))
+            }
+        } else {
+            Ok(Some(RespType::Integer(Some(0))))
+        }
+    }
+
+    fn cmd_bitop(&mut self, args: CmdArg) -> Result<Option<RespType>, CustomError> {
+        let (and, key1, key2) = match &args {
+            CmdArg::AND { key1, key2, .. } => { (true, key1, key2) }
+            CmdArg::OR { key1, key2, .. } => { (false, key1, key2) },
+            _ => return Err(CustomError::InvalidArgument("Invalid args for BITOP".to_string()))
+        };
+
+        let empty_vec = Vec::new();
+        let map1: &[u8] = if let Some(store_item) = self.data.get(key1) {
+            match &store_item.value {
+                StoreValue::Bitmap(bitmap) => {
+                    bitmap
+                }
+                StoreValue::Str(s) => {
+                    s.as_bytes()
+                }
+                _ => return Err(CustomError::UnprocessableError("Wrong data type".to_string()))
+            }
+        } else {
+            empty_vec.as_slice() 
+        };
+
+        let map2: &[u8] = if let Some(store_item) = self.data.get(key2) {
+            match &store_item.value {
+                StoreValue::Bitmap(bitmap) => {
+                    bitmap
+                }
+                StoreValue::Str(s) => {
+                    s.as_bytes()
+                }
+                _ => return Err(CustomError::UnprocessableError("Wrong data type".to_string()))
+            }
+        } else {
+            empty_vec.as_slice() 
+        };
+
+        let output = if and {
+            BitOps::and(map1, map2)
+        } else {
+            BitOps::or(map1, map2)
+        };
+
+        Ok(Some(RespType::Integer(Some(output as i64))))
     }
 }

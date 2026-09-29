@@ -137,6 +137,21 @@ impl TryFrom<u8> for BitValue {
     }
 }
 
+/// Unit of BITCOUNT range, BYTE by default
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum BitUnit {
+    Byte,
+    Bit,
+}
+
+/// Inclusive BITCOUNT range, negative index counts from the end
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct BitRange {
+    pub start: i64,
+    pub end: i64,
+    pub unit: BitUnit,
+}
+
 /// Trait for bitmap operations
 pub struct BitOps;
 
@@ -177,6 +192,55 @@ impl BitOps {
             }
         };
         Ok(())
+    }
+
+    /// Counts set bits, over the whole map or within an inclusive `range`
+    pub fn bit_count(map: &[u8], range: Option<BitRange>) -> usize {
+        let Some(range) = range else {
+            return map.iter().map(|b| b.count_ones() as usize).sum();
+        };
+
+        let len = match range.unit {
+            BitUnit::Byte => map.len() as i64,
+            BitUnit::Bit => map.len() as i64 * 8,
+        };
+
+        // Handle negative index, then clamp to [0, len - 1]
+        let start = if range.start < 0 { (len + range.start).max(0) } else { range.start };
+        let end = if range.end < 0 { (len + range.end).max(0) } else { range.end };
+        let end = end.min(len - 1);
+        if len == 0 || start > end { return 0 };
+
+        let (start, end) = (start as usize, end as usize);
+        match range.unit {
+            BitUnit::Byte => map[start..=end].iter().map(|b| b.count_ones() as usize).sum(),
+            BitUnit::Bit => (start..=end)
+                .filter(|&i| Self::get(map, i).unwrap_or(0) > 0)
+                .count(),
+        }
+    }
+
+    pub fn and(map1: &[u8], map2: &[u8]) -> u8 {
+        let max_len = map1.len().max(map2.len());
+        for i in 0..max_len {
+            let item1 = map1.get(i).unwrap_or(&0u8);
+            let item2 = map2.get(i).unwrap_or(&0u8);
+            if *item1 & *item2 == 0 {
+                return 0u8
+            };
+        };
+        1u8
+    }
+
+    pub fn or(map1: &[u8], map2: &[u8]) -> u8 {
+        let max_len = map1.len().max(map2.len());
+        let mut output = 0u8;
+        for i in 0..max_len {
+            let item1 = map1.get(i).unwrap_or(&0u8);
+            let item2 = map2.get(i).unwrap_or(&0u8);
+            output |= *item1 | *item2;
+        };
+        output
     }
 }
 

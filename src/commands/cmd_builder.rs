@@ -1,6 +1,7 @@
 use std::collections::{ VecDeque };
 use std::u64;
 
+use crate::commands::data_types::{BitRange, BitUnit};
 use crate::commands::utils::resp_arg;
 use crate::exceptions::CustomError;
 use crate::resp::{ RespType };
@@ -73,6 +74,12 @@ const KW_AUTH: &str = "AUTH";
 const KW_SETBIT: &str = "SETBIT";
 const KW_GETBIT: &str = "GETBIT";
 const KW_STRLEN: &str = "STRLEN";
+const KW_BITCOUNT: &str = "BITCOUNT";
+const KW_BYTE: &str = "BYTE";
+const KW_BIT: &str = "BIT";
+const KW_BITOP: &str = "BITOP";
+const KW_AND: &str = "AND";
+const KW_OR: &str = "OR";
 
 #[derive(Debug, PartialEq)]
 pub enum AclRules {
@@ -113,6 +120,8 @@ pub enum CmdArg {
     WhoAmI,
     GetUser(String),
     SetUser{ key: String, rules: Vec<AclRules>},
+    AND{ dest: String, key1: String, key2: String },
+    OR{ dest: String, key1: String, key2: String },
 }
 
 impl CmdArg {
@@ -170,6 +179,20 @@ impl CmdArg {
                 let rules = AclRules::set(values)?;
                 Ok(Self::SetUser{ key: username, rules: vec![rules] })
             },
+            KW_AND => {
+                let key1 = values.pop_front()
+                    .ok_or(CustomError::MissingArgument("key1 not provided".to_string()))?;
+                let key2 = values.pop_front()
+                    .ok_or(CustomError::MissingArgument("key2 not provided".to_string()))?;
+                Ok(Self::AND { dest: key, key1, key2 })
+            }
+            KW_OR => {
+                let key1 = values.pop_front()
+                    .ok_or(CustomError::MissingArgument("key1 not provided".to_string()))?;
+                let key2 = values.pop_front()
+                    .ok_or(CustomError::MissingArgument("key2 not provided".to_string()))?;
+                Ok(Self::AND { dest: key, key1, key2 })
+            }
             _ => Err(CustomError::InvalidArgument(format!("Invalid arg for {}", &key))),
         }
     }
@@ -229,6 +252,8 @@ pub enum Cmd {
     SETBIT{ key: String, offset: usize, bit: u8},
     GETBIT{ key: String, offset: usize },
     STRLEN(String),
+    BITCOUNT{key: String, range: Option<BitRange>},
+    BITOP(CmdArg)
 }
 
 impl Cmd {
@@ -1166,6 +1191,45 @@ impl Cmd {
         Ok(Self::STRLEN(key))
     }
 
+    fn bitcount(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let key = resp_arg!(values, "Bit key not provided", String);
+
+        // BITCOUNT key [start end [BYTE | BIT]]
+        if values.is_empty() {
+            return Ok(Self::BITCOUNT { key, range: None });
+        };
+
+        let start = resp_arg!(values, "Start index not provided", String).parse::<i64>()?;
+        let end = resp_arg!(values, "End index not provided", String).parse::<i64>()?;
+        let unit = match values.pop_front() {
+            None => BitUnit::Byte,
+            Some(v) => {
+                let mut s = v.get_str()
+                    .ok_or(CustomError::InvalidArgument("ERR syntax error".to_string()))?;
+                s.make_ascii_uppercase();
+                match s.as_str() {
+                    KW_BYTE => BitUnit::Byte,
+                    KW_BIT => BitUnit::Bit,
+                    _ => return Err(CustomError::InvalidArgument("ERR syntax error".to_string())),
+                }
+            }
+        };
+        if !values.is_empty() {
+            return Err(CustomError::InvalidArgument("ERR syntax error".to_string()));
+        };
+
+        Ok(Self::BITCOUNT { key, range: Some(BitRange { start, end, unit }) })
+    }
+
+    fn bitop(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        let dest = resp_arg!(values, "BITOP dest not provided", String);
+        let key1 = resp_arg!(values, "BITOP key1 not provided", String);
+        let key2 = resp_arg!(values, "BITOP key2 not provided", String);
+
+        let cmd_arg = CmdArg::set(dest, VecDeque::from([key1, key2]))?;
+        Ok(Self::BITOP(cmd_arg))
+    }
+
     pub fn from_resp(resp_type: RespType) -> Result<Self, CustomError> {
         // Instantiate Cmd from RespType
         match resp_type {
@@ -1236,6 +1300,7 @@ impl Cmd {
                                         KW_SETBIT => Self::setbit(v),
                                         KW_GETBIT => Self::getbit(v),
                                         KW_STRLEN => Self::strlen(v),
+                                        KW_BITCOUNT => Self::bitcount(v),
                                         _ => Err(
                                             CustomError::InvalidArgument("Invalid command".to_string()))
                                     } 
