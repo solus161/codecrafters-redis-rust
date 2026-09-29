@@ -179,19 +179,18 @@ impl CmdArg {
                 let rules = AclRules::set(values)?;
                 Ok(Self::SetUser{ key: username, rules: vec![rules] })
             },
-            KW_AND => {
+            KW_AND | KW_OR => {
+                let dest = values.pop_front()
+                    .ok_or(CustomError::MissingArgument("dest not provided".to_string()))?;
                 let key1 = values.pop_front()
                     .ok_or(CustomError::MissingArgument("key1 not provided".to_string()))?;
                 let key2 = values.pop_front()
                     .ok_or(CustomError::MissingArgument("key2 not provided".to_string()))?;
-                Ok(Self::AND { dest: key, key1, key2 })
-            }
-            KW_OR => {
-                let key1 = values.pop_front()
-                    .ok_or(CustomError::MissingArgument("key1 not provided".to_string()))?;
-                let key2 = values.pop_front()
-                    .ok_or(CustomError::MissingArgument("key2 not provided".to_string()))?;
-                Ok(Self::AND { dest: key, key1, key2 })
+                if key.as_str() == KW_AND {
+                    Ok(Self::AND { dest, key1, key2 })
+                } else {
+                    Ok(Self::OR { dest, key1, key2 })
+                }
             }
             _ => Err(CustomError::InvalidArgument(format!("Invalid arg for {}", &key))),
         }
@@ -265,8 +264,8 @@ impl Cmd {
     pub const fn to_be_broadcast(&self) -> bool {
         matches!(self,
             Self::SET { .. } | Self::LPUSH { .. } | Self::RPUSH { .. } |
-            Self::LPOP { .. } | Self::BLPOP { .. } | Self::INCR(_) | 
-            Self::XADD { .. } 
+            Self::LPOP { .. } | Self::BLPOP { .. } | Self::INCR(_) |
+            Self::XADD { .. } | Self::SETBIT { .. } | Self::BITOP(_)
         )
     }
 
@@ -1222,11 +1221,14 @@ impl Cmd {
     }
 
     fn bitop(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
+        // BITOP AND|OR dest key1 key2
+        let mut op = resp_arg!(values, "BITOP operation not provided", String);
+        op.make_ascii_uppercase();
         let dest = resp_arg!(values, "BITOP dest not provided", String);
         let key1 = resp_arg!(values, "BITOP key1 not provided", String);
         let key2 = resp_arg!(values, "BITOP key2 not provided", String);
 
-        let cmd_arg = CmdArg::set(dest, VecDeque::from([key1, key2]))?;
+        let cmd_arg = CmdArg::set(op, VecDeque::from([dest, key1, key2]))?;
         Ok(Self::BITOP(cmd_arg))
     }
 
@@ -1301,6 +1303,7 @@ impl Cmd {
                                         KW_GETBIT => Self::getbit(v),
                                         KW_STRLEN => Self::strlen(v),
                                         KW_BITCOUNT => Self::bitcount(v),
+                                        KW_BITOP => Self::bitop(v),
                                         _ => Err(
                                             CustomError::InvalidArgument("Invalid command".to_string()))
                                     } 

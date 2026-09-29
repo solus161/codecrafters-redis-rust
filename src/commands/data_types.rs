@@ -220,27 +220,21 @@ impl BitOps {
         }
     }
 
-    pub fn and(map1: &[u8], map2: &[u8]) -> u8 {
-        let max_len = map1.len().max(map2.len());
-        for i in 0..max_len {
-            let item1 = map1.get(i).unwrap_or(&0u8);
-            let item2 = map2.get(i).unwrap_or(&0u8);
-            if *item1 & *item2 == 0 {
-                return 0u8
-            };
-        };
-        1u8
+    /// Byte-wise AND, the shorter map is padded with zero bytes
+    pub fn and(map1: &[u8], map2: &[u8]) -> Vec<u8> {
+        Self::combine(map1, map2, |a, b| a & b)
     }
 
-    pub fn or(map1: &[u8], map2: &[u8]) -> u8 {
+    /// Byte-wise OR, the shorter map is padded with zero bytes
+    pub fn or(map1: &[u8], map2: &[u8]) -> Vec<u8> {
+        Self::combine(map1, map2, |a, b| a | b)
+    }
+
+    fn combine(map1: &[u8], map2: &[u8], op: impl Fn(u8, u8) -> u8) -> Vec<u8> {
         let max_len = map1.len().max(map2.len());
-        let mut output = 0u8;
-        for i in 0..max_len {
-            let item1 = map1.get(i).unwrap_or(&0u8);
-            let item2 = map2.get(i).unwrap_or(&0u8);
-            output |= *item1 | *item2;
-        };
-        output
+        (0..max_len)
+            .map(|i| op(*map1.get(i).unwrap_or(&0u8), *map2.get(i).unwrap_or(&0u8)))
+            .collect()
     }
 }
 
@@ -265,6 +259,12 @@ impl Bitmap {
             let new_map: Vec<u8> = (0..extend).map(|_| 0u8).collect();
             self.0.extend(new_map);
         };
+    }
+}
+
+impl From<Vec<u8>> for Bitmap {
+    fn from(map: Vec<u8>) -> Self {
+        Self(map)
     }
 }
 

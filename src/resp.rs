@@ -567,6 +567,15 @@ impl RespType {
         
     }
 
+    /// Pre-serialized bulk string for binary data, which may not be valid UTF-8
+    pub fn bulk_bytes(v: &[u8]) -> Self {
+        let mut output: Vec<u8> = Vec::new();
+        write!(&mut output, "${}{}", v.len(), DELIMITER).unwrap();
+        output.extend_from_slice(v);
+        output.extend_from_slice(DELIMITER.as_bytes());
+        Self::Bytes(Some(output))
+    }
+
     pub fn get_str(self) -> Option<String> {
         match self {
             Self::SimpleStr(o) => o,

@@ -240,7 +240,11 @@ impl RequestRegistry {
         match cmd {
             Cmd::SET { key, .. } |
             Cmd::LPUSH { key, .. } | Cmd::RPUSH { key, .. } |
-            Cmd::LPOP { key, .. } | Cmd::BLPOP { key, .. } => {
+            Cmd::LPOP { key, .. } | Cmd::BLPOP { key, .. } |
+            Cmd::INCR(key) | Cmd::XADD { key, .. } |
+            Cmd::SETBIT { key, .. } |
+            Cmd::BITOP(CmdArg::AND { dest: key, .. }) |
+            Cmd::BITOP(CmdArg::OR { dest: key, .. }) => {
                 match self.watchlist.get_mut(&Rc::from(key.as_str())) {
                     Some(w) => {
                         for (client_id, dirty) in w {
@@ -743,14 +747,7 @@ impl CmdHandler {
                         value: value
                     }))
                 },
-                StoreValue::Bitmap(x) => {
-                    let bytes: Vec<u8> = x.iter().rev().map(|x| *x).collect();
-                    let value: String = String::from_utf8(bytes)?;
-                    Ok(Some(RespType::BulkStr { 
-                        length: value.len(),
-                        value: Some(value),
-                    }))
-                }
+                StoreValue::Bitmap(x) => Ok(Some(RespType::bulk_bytes(x))),
                 _ => Err(CustomError::UnsupportedCmd(format!("Unsupported command {}", &key)))
             },
             // No key found
@@ -2377,9 +2374,9 @@ impl CmdHandler {
     }
 
     fn cmd_bitop(&mut self, args: CmdArg) -> Result<Option<RespType>, CustomError> {
-        let (and, key1, key2) = match &args {
-            CmdArg::AND { key1, key2, .. } => { (true, key1, key2) }
-            CmdArg::OR { key1, key2, .. } => { (false, key1, key2) },
+        let (and, dest, key1, key2) = match &args {
+            CmdArg::AND { dest, key1, key2 } => { (true, dest, key1, key2) }
+            CmdArg::OR { dest, key1, key2 } => { (false, dest, key1, key2) },
             _ => return Err(CustomError::InvalidArgument("Invalid args for BITOP".to_string()))
         };
 
@@ -2418,6 +2415,17 @@ impl CmdHandler {
             BitOps::or(map1, map2)
         };
 
-        Ok(Some(RespType::Integer(Some(output as i64))))
+        // Result overwrites dest, an empty result deletes dest
+        let length = output.len();
+        if output.is_empty() {
+            self.data.remove(dest);
+        } else {
+            self.data.insert(
+                dest.clone(),
+                StoreItem::new(StoreValue::Bitmap(Bitmap::from(output)), None),
+            );
+        };
+
+        Ok(Some(RespType::Integer(Some(length as i64))))
     }
 }
