@@ -299,48 +299,23 @@ impl Cmd {
     fn pong() -> Result<Self, CustomError> { Ok(Self::PONG) }
     fn ok() -> Result<Self, CustomError> { Ok(Self::OK) }
     fn echo(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg = "No argument provided for ECHO";
-        let s: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg.to_string()))?;
+        let s: String = resp_arg!(values, "No argument provided for ECHO", String);
         Ok(Self::ECHO(s))
     }
     
     fn set(mut values: VecDeque<RespType> ) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for SET";
-        let key: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key: String = resp_arg!(values, "No key provided for SET", String);
         
-        let msg_value = "No value provided for SET";
-        let value: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_value.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_value.to_string()))?;
+        let value: String = resp_arg!(values, "No value provided for SET", String);
 
         // Parsing expiration arg
         let msg_exp_key = "No arg provided for expiration";
-        let msg_exp_value = "No value provided for expiration";
         match values.pop_front() {
             // Having option
             Some(o) => {
                 let expire_key: String = o.get_str()
                     .ok_or(CustomError::MissingArgument(msg_exp_key.to_string()))?;        
-                let expire_value: String = values.pop_front()
-                    .ok_or(CustomError::MissingArgument(msg_exp_value.to_string()))?
-                    .get_str()
-                    .ok_or(CustomError::MissingArgument(msg_exp_value.to_string()))?;
-                    
-                // let expire_value: String = match values.pop_front() {
-                //     Some(o) => {
-                //         // TODO: handle conversion error
-                //         o.get_str()
-                //             .ok_or(CustomError::MissingArgument(msg_exp_value.to_string()))? 
-                //     },
-                //     None => return Err(CustomError::MissingArgument(msg_exp_value.to_string()))
-                // };
+                let expire_value: String = resp_arg!(values, "No value provided for expiration", String);
                 let opt = CmdArg::set(expire_key, VecDeque::from([expire_value]))?;
                 Ok(Self::SET{ key, value, opt: Some(opt) })
             },
@@ -350,92 +325,50 @@ impl Cmd {
     }
 
     fn get(mut values: VecDeque<RespType>) -> Result<Self, CustomError>{
-        let msg = "No key provided for GET";
-        let key: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg.to_string()))?;
+        let key: String = resp_arg!(values, "No key provided for GET", String);
         Ok(Cmd::GET{ key })
     }
 
     fn rpush(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for RPUSH";
-        let key: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key: String = resp_arg!(values, "No key provided for RPUSH", String);
         
-        let msg_value = "No value provided for RPUSH";
         let mut list_values: Vec<String> = Vec::new();
         while !values.is_empty() {
             // Pop from values, extract String, push to list_values
-            let v = values.pop_front()
-                .ok_or(CustomError::MissingArgument(msg_value.to_string()))?
-                .get_str()
-                .ok_or(CustomError::MissingArgument(msg_value.to_string()))?;
+            let v = resp_arg!(values, "No value provided for RPUSH", String);
             list_values.push(v);
         };
         Ok(Cmd::RPUSH { key, value: list_values })
     }
     
     fn lrange(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for LRANGE";
-        let key: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key: String = resp_arg!(values, "No key provided for LRANGE", String);
         
-        let msg_start_index = "No start index provided for LRANGE";
-        let start: i64 = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_start_index.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_start_index.to_string()))?
-            .parse()?;
+        let start: i64 = resp_arg!(values, "No start index provided for LRANGE", String).parse()?;
 
-        let msg_stop_index = "No end index provided for LRANGE";
-        let stop: i64 = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_stop_index.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_stop_index.to_string()))?
-            .parse()?;
+        let stop: i64 = resp_arg!(values, "No end index provided for LRANGE", String).parse()?;
         Ok(Self::LRANGE { key, start, stop })
     }
     
     fn lpush(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for LPUSH";
-        let key: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key: String = resp_arg!(values, "No key provided for LPUSH", String);
         
-        let msg_value = "No value provided for LPUSH";
         let mut list_values: VecDeque<String> = VecDeque::new();
         while !values.is_empty() {
             // Pop from values, extract String, push to list_values
-            let v = values.pop_front()
-                .ok_or(CustomError::MissingArgument(msg_value.to_string()))?
-                .get_str()
-                .ok_or(CustomError::MissingArgument(msg_value.to_string()))?;
+            let v = resp_arg!(values, "No value provided for LPUSH", String);
             list_values.push_back(v);
         };
         Ok(Cmd::LPUSH { key, value: list_values })
     }
 
     fn llen(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg = "No key provided for LLEN";
-        let key: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg.to_string()))?;
+        let key: String = resp_arg!(values, "No key provided for LLEN", String);
         Ok(Cmd::LLEN(key))
     }
 
     fn lpop(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for LPOP";
-        let key: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key: String = resp_arg!(values, "No key provided for LPOP", String);
         
         let msg_value = "No length provided for LPOP";
         let length: Option<usize> = match values.pop_front() {
@@ -451,18 +384,9 @@ impl Cmd {
     }
 
     fn blpop(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for BLPOP";
-        let key: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key: String = resp_arg!(values, "No key provided for BLPOP", String);
         
-        let msg_timeout = "No timeout provided for BLPOP";
-        let timeout_ms: f64 = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_timeout.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_timeout.to_string()))?
-            .parse::<f64>()? * 1000.0;
+        let timeout_ms: f64 = resp_arg!(values, "No timeout provided for BLPOP", String).parse::<f64>()? * 1000.0;
         
         let msg_timeout_invalid = "Error while parsing expiration for BLPOP";
         if timeout_ms < 0.0 {
@@ -475,11 +399,7 @@ impl Cmd {
     }
     
     fn ktype(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for TYPE";
-        let key: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key: String = resp_arg!(values, "No key provided for TYPE", String);
         Ok(Self::TYPE(key))
     }
 
@@ -511,17 +431,9 @@ impl Cmd {
     }
 
     fn xadd(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for XADD";
-        let key: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key: String = resp_arg!(values, "No key provided for XADD", String);
 
-        let msg_time_id = "No time id provided for XADD";
-        let timestamp_id: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_time_id.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_time_id.to_string()))?;
+        let timestamp_id: String = resp_arg!(values, "No time id provided for XADD", String);
 
         // Parse timestamp_id
         let id = Self::_parse_stream_id_xadd(timestamp_id)?; 
@@ -578,23 +490,11 @@ impl Cmd {
     }
 
     fn xrange(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for XRANGE";
-        let key: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key: String = resp_arg!(values, "No key provided for XRANGE", String);
 
-        let msg_start_index = "No start id provided for XRANGE";
-        let start_id: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_start_index.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_start_index.to_string()))?;
+        let start_id: String = resp_arg!(values, "No start id provided for XRANGE", String);
     
-        let msg_end_index = "No start id provided for XRANGE";
-        let end_id: String = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_end_index.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_end_index.to_string()))?;
+        let end_id: String = resp_arg!(values, "No start id provided for XRANGE", String);
 
         // Extract start id
         let start = Self::_parse_stream_id_xrange(start_id, false)?;
@@ -613,21 +513,12 @@ impl Cmd {
 
         let parse_u64_arg = |values: &mut VecDeque<RespType>|
             -> Result<u64, CustomError> {
-            let msg = "No argument provided";
-            Ok(values.pop_front()
-                .ok_or(CustomError::MissingArgument(msg.to_string()))?
-                .get_str()
-                .ok_or(CustomError::MissingArgument(msg.to_string()))?
-                .parse::<u64>()?)
+            Ok(resp_arg!(values, "No argument provided", String).parse::<u64>()?)
         };
         
         // COUNT or BLOCK could come first
         loop {
-            let msg = "No argument provided for XREAD";
-            let mut first = values.pop_front()
-                .ok_or(CustomError::MissingArgument(msg.to_string()))?
-                .get_str()
-                .ok_or(CustomError::MissingArgument(msg.to_string()))?;
+            let mut first = resp_arg!(values, "No argument provided for XREAD", String);
             let _ = first.make_ascii_uppercase();
 
             if first == KW_COUNT {
@@ -706,11 +597,7 @@ impl Cmd {
     }
     
     pub fn incr(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg = "No key provided for INCR";
-        let key: String = values.pop_front()
-           .ok_or(CustomError::MissingArgument(msg.to_string()))?
-           .get_str()
-           .ok_or(CustomError::MissingArgument(msg.to_string()))?;
+        let key: String = resp_arg!(values, "No key provided for INCR", String);
         Ok(Self::INCR(key))
     }
 
@@ -748,43 +635,22 @@ impl Cmd {
     }
 
     pub fn info(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg = "No key provided for INFO";
-        let key: String = values.pop_front()
-           .ok_or(CustomError::MissingArgument(msg.to_string()))?
-           .get_str()
-           .ok_or(CustomError::MissingArgument(msg.to_string()))?;
+        let key: String = resp_arg!(values, "No key provided for INFO", String);
         Ok(Self::INFO(key))
     }
 
     pub fn replconf(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for REPLCONF";
-        let arg: String = values.pop_front()
-           .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-           .get_str()
-           .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let arg: String = resp_arg!(values, "No key provided for REPLCONF", String);
 
-        let msg_value = "No value provided for REPLCONF";
-        let value: String = values.pop_front()
-           .ok_or(CustomError::MissingArgument(msg_value.to_string()))?
-           .get_str()
-           .ok_or(CustomError::MissingArgument(msg_value.to_string()))?;
+        let value: String = resp_arg!(values, "No value provided for REPLCONF", String);
         let opt = CmdArg::set(arg, VecDeque::from([value]))?;
         Ok(Self::REPLCONF(opt))
     }
 
     pub fn psync(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_id = "No id provided for PSYNC";
-        let id: String = values.pop_front()
-           .ok_or(CustomError::MissingArgument(msg_id.to_string()))?
-           .get_str()
-           .ok_or(CustomError::MissingArgument(msg_id.to_string()))?;
+        let id: String = resp_arg!(values, "No id provided for PSYNC", String);
         
-        let msg_offset = "No offset provided for PSYNC";
-        let offset: i64 = values.pop_front()
-           .ok_or(CustomError::MissingArgument(msg_offset.to_string()))?
-           .get_str()
-            .ok_or(CustomError::MissingArgument(msg_offset.to_string()))?
-           .parse()?;
+        let offset: i64 = resp_arg!(values, "No offset provided for PSYNC", String).parse()?;
         
         Ok(Self::PSYNC{ id, offset })
     }
@@ -814,19 +680,9 @@ impl Cmd {
     } 
 
     pub fn wait(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_count = "No count provided for WAIT";
-        let count: u64 = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_count.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_count.to_string()))?
-            .parse()?;
+        let count: u64 = resp_arg!(values, "No count provided for WAIT", String).parse()?;
 
-        let msg_timeout = "No timeout provided for WAIT";
-        let timeout_ms: u64 = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_timeout.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_timeout.to_string()))?
-            .parse::<u64>()?;
+        let timeout_ms: u64 = resp_arg!(values, "No timeout provided for WAIT", String).parse::<u64>()?;
         
         if timeout_ms <= 0 {
             Ok(Cmd::WAIT { count, timeout_ms: None })
@@ -836,28 +692,16 @@ impl Cmd {
     }
 
     pub fn config(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_arg = "No arg provided for CONFIG";
-        let arg = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_arg.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_arg.to_string()))?;
+        let arg = resp_arg!(values, "No arg provided for CONFIG", String);
         
-        let msg_value = "No value provided for CONFIG";
-        let value = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_value.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_value.to_string()))?;
+        let value = resp_arg!(values, "No value provided for CONFIG", String);
 
         let opt = CmdArg::set(arg, VecDeque::from([value]))?;
         Ok(Cmd::CONFIG(opt))
     }
 
     pub fn keys(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_arg = "No arg provided for KEYS";
-        let arg = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_arg.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_arg.to_string()))?;
+        let arg = resp_arg!(values, "No arg provided for KEYS", String);
 
         Ok(Cmd::KEYS(arg))
     }
@@ -875,11 +719,7 @@ impl Cmd {
     }
 
     pub fn unsubscribe(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_arg = "No arg provided for UNSUBSCRIBE";
-        let key = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_arg.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_arg.to_string()))?;
+        let key = resp_arg!(values, "No arg provided for UNSUBSCRIBE", String);
 
         Ok(Self::UNSUBSCRIBE(key))
     }
@@ -897,164 +737,77 @@ impl Cmd {
     }
 
     fn publish(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No channel name provided for PUBLISH";
-        let key = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key = resp_arg!(values, "No channel name provided for PUBLISH", String);
 
-        let msg_msg = "No message provided for PUBLISH";
-        let message = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_msg.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_msg.to_string()))?;
+        let message = resp_arg!(values, "No message provided for PUBLISH", String);
 
         Ok(Self::PUBLISH { key, message })
     }
 
     fn zadd(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for ZADD";
-        let key = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key = resp_arg!(values, "No key provided for ZADD", String);
 
-        let msg_score = "No score provided for ZADD";
-        let score: f64 = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_score.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_score.to_string()))?
-            .parse::<f64>()?;
+        let score: f64 = resp_arg!(values, "No score provided for ZADD", String).parse::<f64>()?;
 
-        let msg_member = "No member provided for ZADD";
-        let member = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?;
+        let member = resp_arg!(values, "No member provided for ZADD", String);
 
         Ok(Cmd::ZADD { key, score, member })
     }
 
     fn zrank(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for ZRANK";
-        let key = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key = resp_arg!(values, "No key provided for ZRANK", String);
 
-        let msg_member = "No member provided for ZRANK";
-        let member = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?;
+        let member = resp_arg!(values, "No member provided for ZRANK", String);
 
         Ok(Cmd::ZRANK { key, member }) 
     }
 
     fn zrange(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for ZRANGE";
-        let key = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key = resp_arg!(values, "No key provided for ZRANGE", String);
 
-        let msg_start = "No start index provided for ZRANGE";
-        let start = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_start.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_start.to_string()))?
-            .parse::<i64>()?;
+        let start = resp_arg!(values, "No start index provided for ZRANGE", String).parse::<i64>()?;
 
-        let msg_end = "No end index provided for ZRANGE";
-        let end = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_end.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_end.to_string()))?
-            .parse::<i64>()?;
+        let end = resp_arg!(values, "No end index provided for ZRANGE", String).parse::<i64>()?;
 
         Ok(Cmd::ZRANGE { key, start, end })
     }
 
     fn zcard(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for ZCARD";
-        let key = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key = resp_arg!(values, "No key provided for ZCARD", String);
 
         Ok(Cmd::ZCARD(key))
     }
 
     fn zscore(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for ZSCORE";
-        let key = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key = resp_arg!(values, "No key provided for ZSCORE", String);
 
-        let msg_member = "No member provided for ZSCORE";
-        let member = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?;
+        let member = resp_arg!(values, "No member provided for ZSCORE", String);
 
         Ok(Cmd::ZSCORE { key, member })
     }
 
     fn zrem(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for ZREM";
-        let key = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key = resp_arg!(values, "No key provided for ZREM", String);
         
-        let msg_member = "No member provided for ZREM";
-        let member = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?;
+        let member = resp_arg!(values, "No member provided for ZREM", String);
 
         Ok(Cmd::ZREM{ key, member })
     }
 
     fn geoadd(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for GEOADD";
-        let key = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key = resp_arg!(values, "No key provided for GEOADD", String);
         
-        let msg_long = "No longitude provided for GEOADD";
-        let long = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_long.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_long.to_string()))?
-            .parse::<f64>()?
-            .to_string();
+        let long = resp_arg!(values, "No longitude provided for GEOADD", String).parse::<f64>()?.to_string();
         
-        let msg_lat = "No latitude provided for GEOADD";
-        let lat = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_lat.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_lat.to_string()))?
-            .parse::<f64>()?
-            .to_string();
+        let lat = resp_arg!(values, "No latitude provided for GEOADD", String).parse::<f64>()?.to_string();
          
-        let msg_member = "No member provided for GEOADD";
-        let member = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_member.to_string()))?;   
+        let member = resp_arg!(values, "No member provided for GEOADD", String);
 
         Ok(Cmd::GEOADD { key, long, lat, member })
     }
 
     fn geopos(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for GEOPOS";
-        let key = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key = resp_arg!(values, "No key provided for GEOPOS", String);
 
         let mut members: Vec<String> = Vec::new();
         let _ = values.drain(..).try_for_each(|v| -> Result<(), CustomError> {
@@ -1069,11 +822,7 @@ impl Cmd {
     }
 
     fn geodist(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for GEODIST";
-        let key = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key = resp_arg!(values, "No key provided for GEODIST", String);
         
         let msg_members = "Need 2 locations for distance calculation";
         let mut members: Vec<String> = Vec::new();
@@ -1089,47 +838,18 @@ impl Cmd {
     }
 
     fn geosearch(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_key = "No key provided for GEOSEARCH";
-        let key = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_key.to_string()))?;
+        let key = resp_arg!(values, "No key provided for GEOSEARCH", String);
 
-        let msg_from_arg = "No FROM arg provided";
-        let _from_arg_str = values.pop_front() // DEFAULT FROMLONLAT
-            .ok_or(CustomError::MissingArgument(msg_from_arg.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_from_arg.to_string()))?;
+        let _from_arg_str = resp_arg!(values, "No FROM arg provided", String); // DEFAULT FROMLONLAT
 
-        let msg_long_lat = "No long/lat provided";
-        let long = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_long_lat.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_long_lat.to_string()))?
-            .parse::<f64>()?;
-        let lat = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_long_lat.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_long_lat.to_string()))?
-            .parse::<f64>()?;
+        let long = resp_arg!(values, "No long/lat provided", String).parse::<f64>()?;
+        let lat = resp_arg!(values, "No long/lat provided", String).parse::<f64>()?;
         let from_arg = CmdArg::FromLonLat((long, lat));
         
-        let msg_by_arg = "No BY arg provided";
-        let _by_arg_str = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_by_arg.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_by_arg.to_string()))?;
+        let _by_arg_str = resp_arg!(values, "No BY arg provided", String);
         
-        let msg_radius = "No radius provided";
-        let radius: f64 = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_radius.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_radius.to_string()))?
-            .parse::<f64>()?;
-        let _unit = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_radius.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_radius.to_string()))?;
+        let radius: f64 = resp_arg!(values, "No radius provided", String).parse::<f64>()?;
+        let _unit = resp_arg!(values, "No radius provided", String);
         let by_arg = CmdArg::ByRadius(radius);
         
         // TODO: this is partly implemented, so no need to check for unit
@@ -1138,34 +858,21 @@ impl Cmd {
     }
 
     fn acl(mut values:VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_kw = "No arg provided for ACL";
-        let kw = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_kw.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_kw.to_string()))?;
+        let kw = resp_arg!(values, "No arg provided for ACL", String);
 
         let mut kw_values: VecDeque<String> = VecDeque::new();
-        let _ = values.drain(..).try_for_each(|t| -> Result<(), CustomError> {
-            kw_values.push_back(t.get_str().ok_or(CustomError::Dummy)?);
-            Ok(())
-        });
+        while !values.is_empty() {
+            kw_values.push_back(resp_arg!(values, "No arg value provided for ACL", String));
+        };
 
         let opt = CmdArg::set(kw, kw_values)?;
         Ok(Self::Acl(opt)) 
     }
 
     fn auth(mut values: VecDeque<RespType>) -> Result<Self, CustomError> {
-        let msg_username = "Username not provided";
-        let username = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_username.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_username.to_string()))?;
+        let username = resp_arg!(values, "Username not provided", String);
 
-        let msg_password = "Password not provided";
-        let password = values.pop_front()
-            .ok_or(CustomError::MissingArgument(msg_password.to_string()))?
-            .get_str()
-            .ok_or(CustomError::MissingArgument(msg_password.to_string()))?;
+        let password = resp_arg!(values, "Password not provided", String);
 
         Ok(Self::Auth { username, password })
     }
